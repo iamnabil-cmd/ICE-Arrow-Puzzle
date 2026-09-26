@@ -28,11 +28,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Diamond
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -50,6 +52,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -73,6 +76,8 @@ fun LevelCompleteScreen(
 ) {
     val lastLevel by viewModel.lastCompletedLevel.collectAsState()
     val accuracy by viewModel.accuracyPercent.collectAsState()
+    val clearTimeMs by viewModel.lastClearTimeMs.collectAsState()
+    val mistakes by viewModel.lastMistakes.collectAsState()
     val levelDef = lastLevel ?: return
 
     // Falling confetti anim
@@ -213,7 +218,7 @@ fun LevelCompleteScreen(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "LEVEL ${levelDef.levelNumber} UNLOCKED",
+                                    text = "LEVEL ${levelDef.levelNumber + 1} UNLOCKED",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 11.sp,
                                     color = GlacialBlue
@@ -281,28 +286,26 @@ fun LevelCompleteScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = Color(0xFFEBF5FF)
+                    // How the level went: time to clear all arrows, and how many wrong arrows were tapped
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = null,
-                                tint = GlacialBlue,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "${levelDef.subtitle} • 100% Free",
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 12.sp,
-                                color = GlacialBlue
-                            )
-                        }
+                        ResultChip(
+                            icon = Icons.Default.Timer,
+                            text = formatClearTime(clearTimeMs),
+                            background = Color(0xFFEBF5FF),
+                            tint = GlacialBlue,
+                            modifier = Modifier.testTag("clear_time")
+                        )
+                        val noMistakes = mistakes == 0
+                        ResultChip(
+                            icon = if (noMistakes) Icons.Default.Check else Icons.Default.Close,
+                            text = if (mistakes == 1) "1 Mistake" else "$mistakes Mistakes",
+                            background = if (noMistakes) Color(0xFFE7F8EF) else Color(0xFFFDECEC),
+                            tint = if (noMistakes) Color(0xFF15803D) else Color(0xFFDC2626),
+                            modifier = Modifier.testTag("mistakes")
+                        )
                     }
                 }
             }
@@ -514,4 +517,47 @@ private fun StatPillCard(
             }
         }
     }
+}
+
+@Composable
+private fun ResultChip(
+    icon: ImageVector,
+    text: String,
+    background: Color,
+    tint: Color,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = background,
+        modifier = modifier
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = text,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                color = tint
+            )
+        }
+    }
+}
+
+/** 42_000 ms -> "0:42", 125_000 ms -> "2:05", 3_725_000 ms -> "1:02:05". */
+internal fun formatClearTime(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, seconds) else "%d:%02d".format(minutes, seconds)
 }

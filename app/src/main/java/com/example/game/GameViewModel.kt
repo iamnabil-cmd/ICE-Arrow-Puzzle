@@ -1,6 +1,7 @@
 package com.example.game
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.SoundManager
@@ -37,7 +38,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     val achievementsFlow = dao.getAllAchievementsFlow()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val soundManager = SoundManager {
+    val soundManager = SoundManager(application) {
         progressFlow.value?.soundEnabled ?: true
     }
 
@@ -59,6 +60,25 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _accuracyPercent = MutableStateFlow(100)
     val accuracyPercent: StateFlow<Int> = _accuracyPercent.asStateFlow()
+
+    /** Time taken to clear the last completed level, not counting time spent paused. */
+    private val _lastClearTimeMs = MutableStateFlow(0L)
+    val lastClearTimeMs: StateFlow<Long> = _lastClearTimeMs.asStateFlow()
+
+    /** Wrong arrows tapped in the last completed level (each one cost a life). */
+    private val _lastMistakes = MutableStateFlow(0)
+    val lastMistakes: StateFlow<Int> = _lastMistakes.asStateFlow()
+
+    // Level timer
+    private var levelStartMs = 0L
+    private var pausedTotalMs = 0L
+    private var pauseStartedMs: Long? = null
+
+    private fun playTimeMs(): Long {
+        val now = SystemClock.elapsedRealtime()
+        val currentPause = pauseStartedMs?.let { now - it } ?: 0L
+        return (now - levelStartMs - pausedTotalMs - currentPause).coerceAtLeast(0L)
+    }
 
     init {
         startSplashFlow()
@@ -105,6 +125,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             isShattering = false
         )
         _shards.value = emptyList()
+
+        levelStartMs = SystemClock.elapsedRealtime()
+        pausedTotalMs = 0L
+        pauseStartedMs = null
 
         // Generate the next level in the background so "Next Level" opens instantly
         viewModelScope.launch(Dispatchers.Default) {
@@ -181,7 +205,6 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
         // Free arrow tapped: it slides out, and anything it was blocking is free straight away
         soundManager.playArrowTap()
-        soundManager.playArrowWhoosh()
         hapticManager.tap()
 
         val updatedMap = state.arrows.toMutableMap()
@@ -229,6 +252,8 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
         // Check if level is cleared!
         if (newArrows.values.all { it.isRemoved }) {
+            _lastClearTimeMs.value = playTimeMs()
+            _lastMistakes.value = currentState.errorsMade
             triggerLevelShatterSequence(currentState.definition, currentState.errorsMade)
         }
     }
@@ -482,7 +507,15 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePause() {
         val state = _currentLevelState.value ?: return
-        _currentLevelState.value = state.copy(isPaused = !state.isPaused)
+        val pausing = !state.isPaused
+        val now = SystemClock.elapsedRealtime()
+        if (pausing) {
+            pauseStartedMs = now
+        } else {
+            pauseStartedMs?.let { pausedTotalMs += now - it }
+            pauseStartedMs = null
+        }
+        _currentLevelState.value = state.copy(isPaused = pausing)
     }
 
     fun toggleRestartDialog(show: Boolean) {
@@ -512,6 +545,11 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         )
         soundManager.playArrowTap()
         hapticManager.tap()
+    }
+
+    override fun onCleared() {
+        soundManager.release()
+        super.onCleared()
     }
 
     fun updateSettings(sound: Boolean, music: Boolean, haptics: Boolean) {
