@@ -2,6 +2,7 @@ package com.example
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -45,6 +46,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun IceArrowApp(viewModel: GameViewModel) {
     val screenState by viewModel.screenState.collectAsState()
+
+    // System back goes to the main menu from every screen; on the main menu it leaves the app as usual
+    BackHandler(enabled = screenState != ScreenState.MAIN_MENU && screenState != ScreenState.SPLASH) {
+        viewModel.onMainMenuTapped()
+    }
 
     when (screenState) {
         ScreenState.SPLASH -> {

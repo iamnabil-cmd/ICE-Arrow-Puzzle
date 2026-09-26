@@ -1,27 +1,30 @@
 package com.example.game
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.SoundManager
-import com.example.data.AchievementEntity
 import com.example.data.AppDatabase
-import com.example.data.ArrowDirection
 import com.example.data.ArrowModel
 import com.example.data.GameProgressEntity
 import com.example.data.GridPoint
 import com.example.data.LevelDefinition
+import com.example.data.LevelGenerator
 import com.example.data.LevelRecordEntity
 import com.example.data.LevelRepository
 import com.example.haptics.HapticManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
+import kotlinx.coroutines.withContext
+import java.util.TimeZone
 import kotlin.random.Random
 
 class GameViewModel(application: Application) : AndroidViewModel(application) {
@@ -35,7 +38,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     val achievementsFlow = dao.getAllAchievementsFlow()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val soundManager = SoundManager {
+    val soundManager = SoundManager(application) {
         progressFlow.value?.soundEnabled ?: true
     }
 
@@ -58,6 +61,25 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     private val _accuracyPercent = MutableStateFlow(100)
     val accuracyPercent: StateFlow<Int> = _accuracyPercent.asStateFlow()
 
+    /** Time taken to clear the last completed level, not counting time spent paused. */
+    private val _lastClearTimeMs = MutableStateFlow(0L)
+    val lastClearTimeMs: StateFlow<Long> = _lastClearTimeMs.asStateFlow()
+
+    /** Wrong arrows tapped in the last completed level (each one cost a life). */
+    private val _lastMistakes = MutableStateFlow(0)
+    val lastMistakes: StateFlow<Int> = _lastMistakes.asStateFlow()
+
+    // Level timer
+    private var levelStartMs = 0L
+    private var pausedTotalMs = 0L
+    private var pauseStartedMs: Long? = null
+
+    private fun playTimeMs(): Long {
+        val now = SystemClock.elapsedRealtime()
+        val currentPause = pauseStartedMs?.let { now - it } ?: 0L
+        return (now - levelStartMs - pausedTotalMs - currentPause).coerceAtLeast(0L)
+    }
+
     init {
         startSplashFlow()
     }
@@ -68,9 +90,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             _screenState.value = ScreenState.SPLASH
             delay(1500)
 
-            // Load saved game progress or start at Level 1
+            // Load saved game progress or start at Level 1 (generated off the main thread)
             val savedProgress = dao.getProgress() ?: GameProgressEntity()
-            loadLevel(savedProgress.currentLevel)
+            val def = withContext(Dispatchers.Default) { LevelRepository.getLevel(savedProgress.currentLevel) }
+            startLevel(def)
 
             // Directly proceed to gameplay!
             _screenState.value = ScreenState.GAMEPLAY
@@ -78,7 +101,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadLevel(levelNum: Int) {
-        val def = LevelRepository.getLevel(levelNum)
+        startLevel(LevelRepository.getLevel(levelNum))
+    }
+
+    private fun startLevel(def: LevelDefinition) {
         val arrowStates = def.arrows.associate { arrow ->
             arrow.id to ActiveArrowState(
                 arrow = arrow,
@@ -95,6 +121,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
         _currentLevelState.value = LevelPlayState(
             definition = def,
+            sessionId = SystemClock.elapsedRealtimeNanos(),
             arrows = arrowStates,
             heartsRemaining = 3,
             movesMade = 0,
@@ -103,61 +130,56 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             isShattering = false
         )
         _shards.value = emptyList()
+
+        levelStartMs = SystemClock.elapsedRealtime()
+        pausedTotalMs = 0L
+        pauseStartedMs = null
+
+        // Generate the next level in the background so "Next Level" opens instantly
+        if (!def.isDaily) {
+            viewModelScope.launch(Dispatchers.Default) {
+                LevelRepository.getLevel(def.levelNumber + 1)
+            }
+        }
     }
 
     private fun recalculateBlockedStates(
         def: LevelDefinition,
         arrowMap: MutableMap<String, ActiveArrowState>
     ) {
-        val activeArrows = arrowMap.values.filter { !it.isRemoved }
+        // Arrows that are already sliding out no longer block anything
+        val occupied = HashMap<GridPoint, String>()
+        arrowMap.values
+            .filter { !it.isRemoved && !it.isExiting }
+            .forEach { s -> LevelGenerator.cellsOf(s.arrow).forEach { occupied[it] = s.arrow.id } }
 
-        activeArrows.forEach { state ->
+        arrowMap.values.filter { !it.isRemoved && !it.isExiting }.forEach { state ->
             val arrow = state.arrow
-            // Pure geometric obstruction: blocked if and only if another arrow lies in front
-            val isBlocked = isPathObstructed(def, arrow, activeArrows)
-            arrowMap[arrow.id] = state.copy(isBlocked = isBlocked)
+            arrowMap[arrow.id] = state.copy(isBlocked = isPathObstructed(def, arrow, occupied))
         }
     }
 
+    /** Blocked if and only if another arrow sits anywhere between this arrow's head and the board edge. */
     private fun isPathObstructed(
         def: LevelDefinition,
         arrow: ArrowModel,
-        activeArrows: List<ActiveArrowState>
+        occupied: Map<GridPoint, String>
     ): Boolean {
         var currCol = arrow.head.col + arrow.direction.dx
         var currRow = arrow.head.row + arrow.direction.dy
 
         while (currCol in 0 until def.cols && currRow in 0 until def.rows) {
-            val point = GridPoint(currCol, currRow)
-            // Check if any other active arrow occupies this point
-            val blocker = activeArrows.firstOrNull { other ->
-                other.arrow.id != arrow.id && isPointOnArrow(other.arrow, point)
-            }
-            if (blocker != null) return true
-
+            val who = occupied[GridPoint(currCol, currRow)]
+            if (who != null && who != arrow.id) return true
             currCol += arrow.direction.dx
             currRow += arrow.direction.dy
         }
         return false
     }
 
-    private fun isPointOnArrow(arrow: ArrowModel, pt: GridPoint): Boolean {
-        if (arrow.points.size < 2) return arrow.points.contains(pt)
-        for (i in 0 until arrow.points.size - 1) {
-            val p1 = arrow.points[i]
-            val p2 = arrow.points[i + 1]
-            val minC = minOf(p1.col, p2.col)
-            val maxC = maxOf(p1.col, p2.col)
-            val minR = minOf(p1.row, p2.row)
-            val maxR = maxOf(p1.row, p2.row)
-            if (pt.col in minC..maxC && pt.row in minR..maxR) return true
-        }
-        return false
-    }
-
     fun onArrowTapped(arrowId: String) {
         val state = _currentLevelState.value ?: return
-        if (state.isShattering) return
+        if (state.isShattering || state.isOutOfLives || state.isPaused) return
         val arrowState = state.arrows[arrowId] ?: return
         if (arrowState.isRemoved || arrowState.isExiting) return
 
@@ -168,29 +190,33 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (arrowState.isBlocked) {
-            // Blocked arrow interaction: shake + audio thud + haptic
+            // Blocked arrow: it bumps into its blocker and turns red.
+            // Only the first wrong tap on each arrow costs a life; tapping the same red arrow again is free.
             soundManager.playBlockedThud()
             hapticManager.blocked()
+            val costsLife = !arrowState.isWrong && state.heartsRemaining > 0
             val newArrows = state.arrows.toMutableMap()
-            newArrows[arrowId] = arrowState.copy(shakeTrigger = arrowState.shakeTrigger + 1)
-            val newHearts = (state.heartsRemaining - 1).coerceAtLeast(0)
-            val outOfLives = newHearts == 0
+            newArrows[arrowId] = arrowState.copy(
+                shakeTrigger = arrowState.shakeTrigger + 1,
+                isWrong = true
+            )
+            val newHearts = if (costsLife) state.heartsRemaining - 1 else state.heartsRemaining
             _currentLevelState.value = state.copy(
                 arrows = newArrows,
-                errorsMade = state.errorsMade + 1,
+                errorsMade = state.errorsMade + if (costsLife) 1 else 0,
                 heartsRemaining = newHearts,
-                isOutOfLives = outOfLives
+                isOutOfLives = newHearts == 0
             )
             return
         }
 
-        // Available arrow tapped: start smooth exit!
+        // Free arrow tapped: it slides out, and anything it was blocking is free straight away
         soundManager.playArrowTap()
-        soundManager.playArrowWhoosh()
         hapticManager.tap()
 
         val updatedMap = state.arrows.toMutableMap()
-        updatedMap[arrowId] = arrowState.copy(isExiting = true)
+        updatedMap[arrowId] = arrowState.copy(isExiting = true, isHighlighted = false)
+        recalculateBlockedStates(state.definition, updatedMap)
         _currentLevelState.value = state.copy(
             arrows = updatedMap,
             movesMade = state.movesMade + 1
@@ -200,7 +226,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     fun onArrowExitCompleted(arrowId: String) {
         val currentState = _currentLevelState.value ?: return
         val arrowState = currentState.arrows[arrowId] ?: return
-        if (arrowState.isRemoved) return
+        if (arrowState.isRemoved || !arrowState.isExiting) return
 
         val newArrows = currentState.arrows.toMutableMap()
         newArrows[arrowId] = arrowState.copy(isRemoved = true, isExiting = false, exitProgress = 1f)
@@ -233,6 +259,8 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
         // Check if level is cleared!
         if (newArrows.values.all { it.isRemoved }) {
+            _lastClearTimeMs.value = playTimeMs()
+            _lastMistakes.value = currentState.errorsMade
             triggerLevelShatterSequence(currentState.definition, currentState.errorsMade)
         }
     }
@@ -252,6 +280,9 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             delay(1500)
+            // The player may have left or restarted during the shatter animation
+            val stillHere = _currentLevelState.value?.let { it.definition == def && it.isShattering } == true
+            if (!stillHere || _screenState.value != ScreenState.GAMEPLAY) return@launch
             soundManager.playVictoryChord()
             hapticManager.celebrate()
 
@@ -269,60 +300,65 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun saveLevelCompletion(def: LevelDefinition, accuracy: Int) {
         val currentProgress = dao.getProgress() ?: GameProgressEntity()
-        val nextLvl = def.levelNumber + 1
-        val newHighest = maxOf(currentProgress.highestUnlockedLevel, nextLvl)
         val isPerfect = accuracy == 100
 
+        // Day streak: +1 for the first clear on a new consecutive day, back to 1 after a missed day
+        val today = localEpochDay()
+        val lastPlayed = currentProgress.lastPlayedDate.toLongOrNull()
+        val newStreak = when (lastPlayed) {
+            today -> currentProgress.streak.coerceAtLeast(1)
+            today - 1 -> currentProgress.streak + 1
+            else -> 1
+        }
+
+        // Replaying an old level or the daily challenge never moves progress backwards or skips ahead
+        val nextLvl = def.levelNumber + 1
         val updatedProgress = currentProgress.copy(
-            currentLevel = nextLvl,
-            highestUnlockedLevel = newHighest,
+            currentLevel = if (def.isDaily) currentProgress.currentLevel else maxOf(currentProgress.currentLevel, nextLvl),
+            highestUnlockedLevel = if (def.isDaily) currentProgress.highestUnlockedLevel
+            else maxOf(currentProgress.highestUnlockedLevel, nextLvl),
             crystals = currentProgress.crystals + def.rewardCrystals,
             coins = currentProgress.coins + def.rewardCoins,
             perfectLevelsCount = currentProgress.perfectLevelsCount + (if (isPerfect) 1 else 0),
-            streak = currentProgress.streak + 1
+            streak = newStreak,
+            lastPlayedDate = today.toString() // stored as the local epoch day
         )
         dao.insertOrUpdateProgress(updatedProgress)
 
-        dao.recordLevelCompletion(
-            LevelRecordEntity(
-                levelNumber = def.levelNumber,
-                stars = if (accuracy >= 95) 3 else if (accuracy >= 80) 2 else 1,
-                bestAccuracy = accuracy,
-                isCompleted = true
-            )
-        )
-
-        // Check achievements
-        updateAchievementsProgress(updatedProgress)
-    }
-
-    private suspend fun updateAchievementsProgress(progress: GameProgressEntity) {
-        val achievements = dao.getAllAchievementsFlow()
-        // Simple helper to mark achievements
-        // "ICE BREAKER"
-        if (progress.currentLevel >= 2) {
-            dao.updateAchievement(
-                AchievementEntity(
-                    id = "ach_ice_breaker",
-                    title = "ICE BREAKER",
-                    description = "Complete your first ice puzzle level.",
-                    currentProgress = 1,
-                    targetProgress = 1,
-                    isUnlocked = true,
-                    rewardCrystals = 50
+        if (!def.isDaily) {
+            val stars = if (accuracy >= 95) 3 else if (accuracy >= 80) 2 else 1
+            val previous = dao.getLevelRecord(def.levelNumber)
+            // Keep the best result when a level is replayed
+            dao.recordLevelCompletion(
+                LevelRecordEntity(
+                    levelNumber = def.levelNumber,
+                    stars = maxOf(stars, previous?.stars ?: 0),
+                    bestAccuracy = maxOf(accuracy, previous?.bestAccuracy ?: 0),
+                    isCompleted = true
                 )
             )
         }
-        if (progress.currentLevel >= 6) {
+
+        updateAchievementsProgress(updatedProgress)
+    }
+
+    /** Recomputes every achievement from the saved progress, keeping whether its reward was claimed. */
+    private suspend fun updateAchievementsProgress(progress: GameProgressEntity) {
+        dao.insertInitialAchievements(AppDatabase.defaultAchievements) // no-op if they already exist
+        val levelsCleared = (progress.highestUnlockedLevel - 1).coerceAtLeast(0)
+        val existing = dao.getAllAchievementsFlow().first().associateBy { it.id }
+
+        AppDatabase.defaultAchievements.forEach { default ->
+            val value = when (default.id) {
+                "ach_perfect_break" -> progress.perfectLevelsCount
+                "ach_crystal_hunter" -> progress.crystals
+                else -> levelsCleared // ice breaker, glacial apprentice, frozen master, shatter king
+            }
+            val current = existing[default.id] ?: default
             dao.updateAchievement(
-                AchievementEntity(
-                    id = "ach_permafrost",
-                    title = "GLACIAL APPRENTICE",
-                    description = "Clear 5 challenging levels.",
-                    currentProgress = 5,
-                    targetProgress = 5,
-                    isUnlocked = true,
-                    rewardCrystals = 100
+                current.copy(
+                    currentProgress = value.coerceAtMost(current.targetProgress),
+                    isUnlocked = value >= current.targetProgress
                 )
             )
         }
@@ -352,19 +388,51 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onNextLevelTapped() {
-        val cur = _currentLevelState.value?.definition?.levelNumber ?: 1
-        val nextLevel = cur + 1
-        loadLevel(nextLevel)
+        val def = _currentLevelState.value?.definition
+        if (def == null || def.isDaily) {
+            // After the daily challenge, "next" goes back to the player's own level
+            onContinueGameTapped()
+            return
+        }
+        loadLevel(def.levelNumber + 1)
         _screenState.value = ScreenState.GAMEPLAY
     }
 
+    /** Restarts whatever was just played, including the daily challenge. */
     fun onReplayLevelTapped() {
-        val cur = _currentLevelState.value?.definition?.levelNumber ?: 1
-        loadLevel(cur)
+        val def = _currentLevelState.value?.definition ?: LevelRepository.getLevel(1)
+        startLevel(def)
+        _screenState.value = ScreenState.GAMEPLAY
+    }
+
+    /** Resumes the level in progress if it's the player's current one, otherwise loads it fresh. */
+    fun onContinueGameTapped() {
+        viewModelScope.launch {
+            val level = (dao.getProgress() ?: GameProgressEntity()).currentLevel
+            val state = _currentLevelState.value
+            val canResume = state != null && !state.definition.isDaily &&
+                state.definition.levelNumber == level && !state.isAllCleared && !state.isShattering
+            if (!canResume) loadLevel(level) else if (!state!!.isPaused) resumeTimer()
+            _screenState.value = ScreenState.GAMEPLAY
+        }
+    }
+
+    /** Always starts the player's current level from the beginning. */
+    fun onRestartGameTapped() {
+        viewModelScope.launch {
+            loadLevel((dao.getProgress() ?: GameProgressEntity()).currentLevel)
+            _screenState.value = ScreenState.GAMEPLAY
+        }
+    }
+
+    fun onPlayDailyChallengeTapped() {
+        startLevel(LevelRepository.getDailyLevel(localEpochDay()))
         _screenState.value = ScreenState.GAMEPLAY
     }
 
     fun onMainMenuTapped() {
+        // Leaving a level in progress pauses its clear timer
+        if (_screenState.value == ScreenState.GAMEPLAY) pauseTimer()
         _screenState.value = ScreenState.MAIN_MENU
     }
 
@@ -376,14 +444,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         _screenState.value = ScreenState.PROFILE
     }
 
-    fun onBackToGameplay() {
-        _screenState.value = ScreenState.GAMEPLAY
-    }
-
     // Boosters / Tools
     fun onHintTapped() {
         val state = _currentLevelState.value ?: return
-        val availableArrow = state.arrows.values.firstOrNull { !it.isRemoved && !it.isBlocked } ?: return
+        val availableArrow = state.arrows.values.firstOrNull { !it.isRemoved && !it.isExiting && !it.isBlocked } ?: return
 
         viewModelScope.launch {
             val progress = dao.getProgress() ?: GameProgressEntity()
@@ -486,7 +550,24 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePause() {
         val state = _currentLevelState.value ?: return
-        _currentLevelState.value = state.copy(isPaused = !state.isPaused)
+        val pausing = !state.isPaused
+        if (pausing) pauseTimer() else resumeTimer()
+        _currentLevelState.value = state.copy(isPaused = pausing)
+    }
+
+    /** Days since 1970-01-01 in the phone's time zone (java.time needs API 26, the app supports 24+). */
+    private fun localEpochDay(): Long {
+        val now = System.currentTimeMillis()
+        return (now + TimeZone.getDefault().getOffset(now)) / 86_400_000L
+    }
+
+    private fun pauseTimer() {
+        if (pauseStartedMs == null) pauseStartedMs = SystemClock.elapsedRealtime()
+    }
+
+    private fun resumeTimer() {
+        pauseStartedMs?.let { pausedTotalMs += SystemClock.elapsedRealtime() - it }
+        pauseStartedMs = null
     }
 
     fun toggleRestartDialog(show: Boolean) {
@@ -516,6 +597,11 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         )
         soundManager.playArrowTap()
         hapticManager.tap()
+    }
+
+    override fun onCleared() {
+        soundManager.release()
+        super.onCleared()
     }
 
     fun updateSettings(sound: Boolean, music: Boolean, haptics: Boolean) {

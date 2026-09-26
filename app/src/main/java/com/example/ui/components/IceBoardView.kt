@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,8 +55,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -65,6 +68,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -72,6 +76,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.ArrowDirection
 import com.example.data.ArrowModel
+import com.example.data.GridPoint
+import com.example.data.LevelGenerator
 import com.example.game.ActiveArrowState
 import com.example.game.LevelPlayState
 import com.example.ui.theme.AuroraGold
@@ -85,13 +91,14 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
+import kotlin.random.Random
 
 /**
  * Middle Section:
- * 1. Trapped transparent achievement element completely behind the 3D ice block
- * 2. Translucent 3D crystal ice block that cracks bit-by-bit with every arrow, and cracks open completely on the last arrow
- * 3. Thick arrow design with sharp directional arrowhead pointer (matching arrow-design.jpg)
- * 4. Thread unspooling exit animation (thread getting out of the box from curved lines to straight line, matching Arrow-going-I-want.mp4)
+ * 1. Reward item frozen inside a chunky, beveled 3D ice cube (frosted corners, crackle veins)
+ * 2. The ice block that cracks bit-by-bit with every arrow, and cracks open completely on the last arrow
+ * 3. Thin arrow line with a bold, sharp directional arrowhead pointer
+ * 4. Snake-style exit: the arrow slides out along its own path at a constant speed and leaves the screen
  * 5. Full Pinch-to-Zoom & Pan support with tooltip on Level 10+
  */
 @Composable
@@ -109,14 +116,14 @@ fun IceBoardView(
     var panOffset by remember { mutableStateOf(Offset.Zero) }
 
     // Reset zoom when level changes
-    LaunchedEffect(def.levelNumber) {
+    LaunchedEffect(levelState.sessionId) {
         zoomScale = 1f
         panOffset = Offset.Zero
     }
 
     // Zoom tip visibility (shown on Level 10+ or complex levels)
     var showZoomTip by remember { mutableStateOf(def.levelNumber >= 10) }
-    LaunchedEffect(def.levelNumber) {
+    LaunchedEffect(levelState.sessionId) {
         if (def.levelNumber >= 10) {
             showZoomTip = true
             delay(5000)
@@ -134,6 +141,13 @@ fun IceBoardView(
                 repeatMode = RepeatMode.Reverse
             )
         )
+    }
+
+    // Level intro: arrows draw themselves in when a level starts
+    val introAnim = remember { Animatable(0f) }
+    LaunchedEffect(levelState.sessionId) {
+        introAnim.snapTo(0f)
+        introAnim.animateTo(1f, tween(650, easing = FastOutSlowInEasing))
     }
 
     // Touch ring ripple feedback
@@ -318,48 +332,68 @@ fun IceBoardView(
                     }
                 }
             } else {
-                // TRAPPED STATE (Image 1):
-                // Clean transparent PNG positioned completely behind the translucent ice block
-                Image(
-                    painter = painterResource(id = rewardRes),
-                    contentDescription = def.rewardItemName,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .size(blockSize * 0.62f)
-                        .alpha(0.55f)
-                )
+                // TRAPPED STATE: the reward is frozen inside a chunky 3D ice cube.
+                // Layer order: ice body (back) -> reward item -> frosted ice face (front) -> arrows.
+                val iceShape = RoundedCornerShape(blockSize * IceCornerFraction)
+                val rimInset = blockSize * IceRimFraction
+                val arrowPadding = rimInset + 4.dp
 
                 // ==========================================
-                // LAYER 2: 3D TRANSLUCENT ICE BLOCK & CRACKS
+                // LAYER 2a: ICE CUBE BODY (BEHIND THE REWARD)
                 // ==========================================
                 Canvas(
                     modifier = Modifier
                         .fillMaxSize()
                         .shadow(
-                            elevation = 16.dp,
-                            shape = RoundedCornerShape(32.dp),
-                            spotColor = Color(0x332D8FE8),
-                            ambientColor = Color(0x1A2D8FE8)
+                            elevation = 18.dp,
+                            shape = iceShape,
+                            spotColor = Color(0x552D8FE8),
+                            ambientColor = Color(0x332D8FE8)
                         )
-                        .clip(RoundedCornerShape(32.dp))
+                        .clip(iceShape)
                 ) {
-                    // Translucent 3D crystal ice cube
-                    drawIceCubeBlock(size)
+                    drawIceCubeBody(size, rimInset.toPx())
+                }
+
+                // ==========================================
+                // LAYER 2b: REWARD ITEM FROZEN INSIDE THE ICE
+                // ==========================================
+                Image(
+                    painter = painterResource(id = rewardRes),
+                    contentDescription = def.rewardItemName,
+                    contentScale = ContentScale.Fit,
+                    // Multiply with a pale ice blue so the item looks tinted by the ice around it
+                    colorFilter = ColorFilter.tint(Color(0xFFD6F0FF), BlendMode.Modulate),
+                    modifier = Modifier
+                        .size(blockSize * 0.70f)
+                        .alpha(0.92f)
+                )
+
+                // ==========================================
+                // LAYER 2c: FROSTED ICE FACE, VEINS & CRACKS (IN FRONT OF THE REWARD)
+                // ==========================================
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(iceShape)
+                ) {
+                    drawIceCubeFront(size, rimInset.toPx())
 
                     // Progressive cracks that expand bit by bit with every arrow!
                     if (levelState.crackStage >= 1) {
                         drawDynamicIceCracks(levelState.crackStage, size)
                     }
 
-                    // Touch ripple ring
+                    // Touch ripple ring (tap position is relative to the padded arrow layer)
                     tapRipplePos.value?.let { pos ->
                         if (tapRippleProgress.value in 0.01f..0.99f) {
                             val radius = 10f + tapRippleProgress.value * 34f
                             val alpha = (1f - tapRippleProgress.value) * 0.45f
+                            val pad = arrowPadding.toPx()
                             drawCircle(
                                 color = Color(0xFF2563EB).copy(alpha = alpha),
                                 radius = radius,
-                                center = pos,
+                                center = pos + Offset(pad, pad),
                                 style = Stroke(width = 3.5f)
                             )
                         }
@@ -372,27 +406,22 @@ fun IceBoardView(
                 BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(18.dp)
+                        .padding(arrowPadding)
                 ) {
                     val boardWidth = constraints.maxWidth.toFloat()
                     val boardHeight = constraints.maxHeight.toFloat()
-                    val colStep = boardWidth / (def.cols + 1)
-                    val rowStep = boardHeight / (def.rows + 1)
+                    val density = LocalDensity.current
+                    val grid = remember(def.cols, def.rows, boardWidth, boardHeight, density) {
+                        BoardGrid.fit(def.cols, def.rows, boardWidth, boardHeight, with(density) { MaxDotSpacing.toPx() })
+                    }
 
-                    // Background Dot Grid (matching reference video Arrow-sort-reference.mp4)
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val dotColor = Color(0x35142038)
-                        for (c in 0 until def.cols) {
-                            for (r in 0 until def.rows) {
-                                val cx = (c + 1) * colStep
-                                val cy = (r + 1) * rowStep
-                                drawCircle(
-                                    color = dotColor,
-                                    radius = 2.5f,
-                                    center = Offset(cx, cy)
-                                )
-                            }
-                        }
+                    // Which dot belongs to which arrow (arrows already leaving don't block anyone)
+                    val occupancy = remember(levelState.arrows) {
+                        val map = HashMap<GridPoint, String>()
+                        levelState.arrows.values
+                            .filter { !it.isRemoved && !it.isExiting }
+                            .forEach { s -> LevelGenerator.cellsOf(s.arrow).forEach { map[it] = s.arrow.id } }
+                        map
                     }
 
                     // Alignment Grid Lines (matching Grid.mp4 [#] toggle feature)
@@ -406,7 +435,7 @@ fun IceBoardView(
                             val activeRows = activeArrows.flatMap { it.arrow.points.map { pt -> pt.row } }.toSet()
 
                             activeCols.forEach { col ->
-                                val x = (col + 1) * colStep
+                                val x = grid.x(col)
                                 drawLine(
                                     color = gridLineColor,
                                     start = Offset(x, 0f),
@@ -416,7 +445,7 @@ fun IceBoardView(
                             }
 
                             activeRows.forEach { row ->
-                                val y = (row + 1) * rowStep
+                                val y = grid.y(row)
                                 drawLine(
                                     color = gridLineColor,
                                     start = Offset(0f, y),
@@ -427,8 +456,7 @@ fun IceBoardView(
 
                             // 2. Alignment projection line in direction of each arrow
                             activeArrows.forEach { aState ->
-                                val head = aState.arrow.head
-                                val headOffset = Offset((head.col + 1) * colStep, (head.row + 1) * rowStep)
+                                val headOffset = grid.offset(aState.arrow.head)
                                 val forward = Offset(aState.arrow.direction.dx.toFloat(), aState.arrow.direction.dy.toFloat())
                                 val projectEnd = headOffset + forward * maxOf(size.width, size.height)
 
@@ -445,17 +473,16 @@ fun IceBoardView(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .pointerInput(levelState, zoomScale, panOffset) {
+                            .pointerInput(levelState, zoomScale, panOffset, grid) {
                                 detectTapGestures { tapOffset ->
                                     val activeArrows = levelState.arrows.values.filter { !it.isRemoved && !it.isExiting }
                                     var closestArrowId: String? = null
                                     var minDistance = Float.MAX_VALUE
-                                    val tapThreshold = 52.dp.toPx()
+                                    // Generous on sparse boards, tighter on dense ones so the nearest arrow wins
+                                    val tapThreshold = (grid.step * 0.9f).coerceIn(24.dp.toPx(), 52.dp.toPx())
 
                                     activeArrows.forEach { aState ->
-                                        val pts = aState.arrow.points.map { pt ->
-                                            Offset((pt.col + 1) * colStep, (pt.row + 1) * rowStep)
-                                        }
+                                        val pts = aState.arrow.points.map { grid.offset(it) }
                                         val dist = distanceToArrowPath(tapOffset, pts)
                                         if (dist <= tapThreshold && dist < minDistance) {
                                             minDistance = dist
@@ -479,23 +506,25 @@ fun IceBoardView(
                             }
                         }
 
-                        // Render each arrow with thread unspooling animation
                         levelState.arrows.values.forEach { arrowState ->
                             if (!arrowState.isRemoved || arrowState.isExiting) {
-                                ArrowItem(
-                                    arrowState = arrowState,
-                                    cols = def.cols,
-                                    rows = def.rows,
-                                    boardWidth = boardWidth,
-                                    boardHeight = boardHeight,
-                                    pulseScale = pulseAnim.value,
-                                    onExitCompleted = { onArrowExitCompleted(arrowState.arrow.id) }
-                                )
+                                key(levelState.sessionId, arrowState.arrow.id) {
+                                    ArrowItem(
+                                        arrowState = arrowState,
+                                        grid = grid,
+                                        boardWidth = boardWidth,
+                                        boardHeight = boardHeight,
+                                        freeCellsAhead = freeCellsAhead(arrowState.arrow, occupancy, def.cols, def.rows),
+                                        introProgress = introAnim.value,
+                                        pulseScale = pulseAnim.value,
+                                        onExitCompleted = { onArrowExitCompleted(arrowState.arrow.id) }
+                                    )
+                                }
                             }
                         }
 
                         // Tutorial callout for Level 1
-                        if (def.levelNumber == 1 && levelState.removedArrowsCount == 0) {
+                        if (def.levelNumber == 1 && !def.isDaily && levelState.removedArrowsCount == 0) {
                             val centerArrow = levelState.arrows.values.firstOrNull { it.arrow.id == "l1_2" }
                             if (centerArrow != null && !centerArrow.isRemoved) {
                                 TutorialBubble(
@@ -512,319 +541,514 @@ fun IceBoardView(
     }
 }
 
+/** Largest gap between neighbouring dots, so small early levels stay compact instead of stretching out. */
+private val MaxDotSpacing = 34.dp
+
+/** Speed arrows travel at when they slide out, like the reference game. */
+private const val ExitSpeedDpPerMs = 1.25f
+
+/** Maps grid dots to pixel positions: one uniform spacing, centred in the board. */
+private data class BoardGrid(val step: Float, val originX: Float, val originY: Float) {
+    fun x(col: Int) = originX + col * step
+    fun y(row: Int) = originY + row * step
+    fun offset(pt: GridPoint) = Offset(x(pt.col), y(pt.row))
+
+    companion object {
+        fun fit(cols: Int, rows: Int, width: Float, height: Float, maxStep: Float): BoardGrid {
+            val step = minOf(width / (cols + 1), height / (rows + 1), maxStep)
+            return BoardGrid(
+                step = step,
+                originX = (width - step * (cols - 1)) / 2f,
+                originY = (height - step * (rows - 1)) / 2f
+            )
+        }
+    }
+}
+
+/** Number of empty dots between an arrow's head and the first arrow in its way (or the edge). */
+private fun freeCellsAhead(arrow: ArrowModel, occupancy: Map<GridPoint, String>, cols: Int, rows: Int): Int {
+    var c = arrow.head.col + arrow.direction.dx
+    var r = arrow.head.row + arrow.direction.dy
+    var free = 0
+    while (c in 0 until cols && r in 0 until rows) {
+        val who = occupancy[GridPoint(c, r)]
+        if (who != null && who != arrow.id) return free
+        free++
+        c += arrow.direction.dx
+        r += arrow.direction.dy
+    }
+    return free
+}
+
 /**
- * Renders an arrow with THREAD UNSPOOLING animation:
- * - When tapped, the arrow unspools like a thread getting out of the box from curved lines to a straight line!
- * - Head extends forward along the exit direction
- * - Tail follows along the segments of the polyline, turning corners until the whole arrow straightens out and exits!
- * - Thick line with sharp directional arrowhead pointer on the side it will go (matching arrow-design.jpg)
+ * Renders one arrow and its animations:
+ * - Intro: the line draws itself in from the tail when the level starts.
+ * - Exit: it turns blue and slides out snake-style along its own path at a constant speed,
+ *   then keeps going until it has left the screen (like the reference game).
+ * - Wrong tap: it turns red, bumps forward into the arrow that blocks it and springs back.
+ *   It stays red, so the player can see which arrow already cost a life.
  */
 @Composable
 private fun ArrowItem(
     arrowState: ActiveArrowState,
-    cols: Int,
-    rows: Int,
+    grid: BoardGrid,
     boardWidth: Float,
     boardHeight: Float,
+    freeCellsAhead: Int,
+    introProgress: Float,
     pulseScale: Float,
     onExitCompleted: () -> Unit
 ) {
     val arrow = arrowState.arrow
     val isAvailable = !arrowState.isBlocked && !arrowState.isRemoved
     val isHinted = arrowState.isHighlighted
+    val density = LocalDensity.current
 
-    val colStep = boardWidth / (cols + 1)
-    val rowStep = boardHeight / (rows + 1)
+    val originalPoints = remember(arrow.points, grid) { arrow.points.map { grid.offset(it) } }
+    val pathLength = remember(originalPoints) {
+        (0 until originalPoints.size - 1).sumOf { (originalPoints[it + 1] - originalPoints[it]).getDistance().toDouble() }.toFloat()
+    }
 
-    // Shake animation when blocked arrow is tapped
-    val shakeOffset = remember { Animatable(0f) }
+    // How far the snake has travelled along its path (px). Drives both the bump and the exit.
+    val travel = remember { Animatable(0f) }
+
+    // Bump into the blocker and back when a blocked arrow is tapped
     LaunchedEffect(arrowState.shakeTrigger) {
-        if (arrowState.shakeTrigger > 0) {
-            shakeOffset.animateTo(12f, tween(30))
-            shakeOffset.animateTo(-12f, tween(30))
-            shakeOffset.animateTo(8f, tween(30))
-            shakeOffset.animateTo(-8f, tween(30))
-            shakeOffset.animateTo(0f, tween(30))
+        if (arrowState.shakeTrigger > 0 && !arrowState.isExiting) {
+            val bump = (freeCellsAhead + 0.45f) * grid.step
+            travel.snapTo(0f)
+            travel.animateTo(bump, tween(durationMillis = (90 + freeCellsAhead * 25).coerceAtMost(200), easing = FastOutSlowInEasing))
+            travel.animateTo(0f, tween(durationMillis = 180, easing = FastOutSlowInEasing))
         }
     }
 
-    // Continuous 60fps/120fps thread unspooling exit animation (matching Arrow-going-I-want.mp4)
-    val exitAnim = remember { Animatable(0f) }
+    // Exit: slide along the path and all the way off-screen at a constant speed
+    val exitDistance = remember(originalPoints, boardWidth, boardHeight) {
+        val head = originalPoints.last()
+        val toEdge = when (arrow.direction) {
+            ArrowDirection.UP -> head.y
+            ArrowDirection.DOWN -> boardHeight - head.y
+            ArrowDirection.LEFT -> head.x
+            ArrowDirection.RIGHT -> boardWidth - head.x
+        }
+        // Past the board edge, keep going far enough to clear the rest of the screen
+        pathLength + toEdge + maxOf(boardWidth, boardHeight) * 1.3f
+    }
     LaunchedEffect(arrowState.isExiting) {
         if (arrowState.isExiting) {
-            exitAnim.animateTo(
-                targetValue = 1f,
-                animationSpec = tween(durationMillis = 280, easing = LinearEasing)
-            )
+            val remaining = exitDistance - travel.value
+            val speedPxPerMs = with(density) { ExitSpeedDpPerMs.dp.toPx() }
+            val duration = (remaining / speedPxPerMs).toInt().coerceIn(220, 750)
+            travel.animateTo(exitDistance, tween(durationMillis = duration, easing = LinearEasing))
             onExitCompleted()
         }
     }
 
-    // Base coordinates
-    val originalPoints = remember(arrow.points, colStep, rowStep) {
-        arrow.points.map { pt ->
-            Offset((pt.col + 1) * colStep, (pt.row + 1) * rowStep)
-        }
-    }
-
-    // Calculate unspooled thread polyline
-    val boardExitSpan = maxOf(boardWidth, boardHeight) * 1.6f
-    val unspooled = remember(originalPoints, arrow.direction, exitAnim.value) {
+    val unspooled = remember(originalPoints, arrow.direction, travel.value) {
         calculateUnspooledThread(
             originalPoints = originalPoints,
             direction = arrow.direction,
-            progress = exitAnim.value,
-            boardExitDistance = boardExitSpan
+            travel = travel.value
         )
     }
+    if (arrowState.isExiting && travel.value >= exitDistance - 0.5f) return
 
-    if (unspooled.isCompletelyExited) return
-
-    val threadPoints = unspooled.points
-    if (threadPoints.size < 2) return
+    // Intro: reveal the line from the tail towards the head
+    val drawn = if (introProgress < 1f) trimPolyline(unspooled.points, pathLength * introProgress) else unspooled.points
+    if (drawn.size < 2) return
 
     Canvas(modifier = Modifier.fillMaxSize()) {
         val arrowColor = when {
-            arrowState.isExiting -> Color(0xFF2563EB) // Electric blue when unspooling (matching Arrow-going-I-want.mp4)
-            arrowState.isBlocked && arrowState.shakeTrigger > 0 -> ErrorFracture
+            arrowState.isExiting -> Color(0xFF2563EB) // Electric blue while sliding out
             isHinted -> AuroraGold
-            else -> Color(0xFF142038) // Deep midnight navy matching arrow-design.jpg
+            arrowState.isWrong -> Color(0xFFE5484D) // Stays red after costing a life
+            else -> Color(0xFF0F1B3D) // Deep midnight navy
         }
 
         val angleRad = arrow.direction.angleDegrees * PI / 180.0
         val forward = Offset(sin(angleRad).toFloat(), -cos(angleRad).toFloat())
         val normal = Offset(-forward.y, forward.x)
 
-        // Arrowhead pointer dimensions: bolder pointer matching Arrow-going-I-want.mp4
-        val headLength = 26f * (if (isHinted) pulseScale else 1f)
-        val halfWingWidth = 14f * (if (isHinted) pulseScale else 1f)
+        // Thin line + bold, sharp triangular pointer (sized in dp so it looks the same on every screen)
+        val headScale = (if (isHinted) pulseScale else 1f) * ((introProgress - 0.75f) / 0.25f).coerceIn(0f, 1f)
+        val shaftWidth = 3.2.dp.toPx()
+        val headLength = 10.dp.toPx() * headScale
+        val halfWingWidth = 6.5.dp.toPx() * headScale
 
-        val tip = unspooled.headTip + forward * 4f
+        val tip = unspooled.headTip + forward * 3.dp.toPx() * headScale
         val baseCenter = tip - forward * headLength
         val leftWing = baseCenter + normal * halfWingWidth
         val rightWing = baseCenter - normal * halfWingWidth
 
-        // The shaft ends at baseCenter so it connects cleanly into the pointer
+        // The shaft runs slightly into the pointer so there is no visible seam
+        val shaftEnd = baseCenter + forward * 1.dp.toPx() * headScale
         val shaftPath = Path().apply {
-            moveTo(threadPoints.first().x + shakeOffset.value, threadPoints.first().y)
-            for (i in 1 until threadPoints.size - 1) {
-                lineTo(threadPoints[i].x + shakeOffset.value, threadPoints[i].y)
+            moveTo(drawn.first().x, drawn.first().y)
+            for (i in 1 until drawn.size - 1) {
+                lineTo(drawn[i].x, drawn[i].y)
             }
-            lineTo(baseCenter.x + shakeOffset.value, baseCenter.y)
+            val last = if (introProgress < 1f) drawn.last() else shaftEnd
+            lineTo(last.x, last.y)
         }
-
-        // Frosted slot groove behind the arrow in the ice block
-        drawPath(
-            path = shaftPath,
-            color = if (arrowState.isExiting) Color(0x332563EB) else if (isAvailable) Color(0x33BCE7FF) else Color(0x15142038),
-            style = Stroke(width = 24f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        )
 
         // Glow effect when hinted or moving
         if (isHinted) {
             drawPath(
                 path = shaftPath,
                 color = Color(0x88F3C75F),
-                style = Stroke(width = 22f * pulseScale, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = 10.dp.toPx() * pulseScale, cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
         } else if (arrowState.isExiting) {
             drawPath(
                 path = shaftPath,
                 color = Color(0x442563EB),
-                style = Stroke(width = 22f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                style = Stroke(width = 9.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
+        } else if (isAvailable || arrowState.isWrong) {
+            // Faint frosty halo so the thin line stays readable over the frozen reward
+            drawPath(
+                path = shaftPath,
+                color = Color.White.copy(alpha = 0.30f),
+                style = Stroke(width = shaftWidth + 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
         }
 
-        // Thinner, crisp arrow line (width 13f, rounded cap at tail, NO dots, matching user prompt)
+        // Thin, crisp arrow line
         drawPath(
             path = shaftPath,
             color = arrowColor,
-            style = Stroke(width = 13f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            style = Stroke(width = shaftWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
 
-        // SHARP DIRECTIONAL ARROWHEAD POINTER AT THE FRONT (matching arrow-design.jpg)
-        val arrowPointerPath = Path().apply {
-            moveTo(tip.x + shakeOffset.value, tip.y)
-            lineTo(leftWing.x + shakeOffset.value, leftWing.y)
-            lineTo(baseCenter.x + forward.x * 4f + shakeOffset.value, baseCenter.y + forward.y * 4f)
-            lineTo(rightWing.x + shakeOffset.value, rightWing.y)
-            close()
+        if (headScale > 0f) {
+            // Bold, sharp directional arrowhead
+            val arrowPointerPath = Path().apply {
+                moveTo(tip.x, tip.y)
+                lineTo(leftWing.x, leftWing.y)
+                lineTo(rightWing.x, rightWing.y)
+                close()
+            }
+            drawPath(path = arrowPointerPath, color = arrowColor)
+            // Thin stroke in the same color rounds off the very tips so they don't look jagged
+            drawPath(
+                path = arrowPointerPath,
+                color = arrowColor,
+                style = Stroke(width = 1.dp.toPx(), join = StrokeJoin.Round)
+            )
         }
-
-        // Pointer fill
-        drawPath(path = arrowPointerPath, color = arrowColor)
-
-        // Specular highlight outline
-        drawPath(
-            path = arrowPointerPath,
-            color = if (arrowState.isExiting) Color.White.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.25f),
-            style = Stroke(width = 2f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        )
     }
 }
 
+/** Keeps the first [length] px of a polyline. */
+private fun trimPolyline(points: List<Offset>, length: Float): List<Offset> {
+    if (points.size < 2 || length <= 0f) return emptyList()
+    val out = mutableListOf(points.first())
+    var left = length
+    for (i in 0 until points.size - 1) {
+        val seg = (points[i + 1] - points[i]).getDistance()
+        if (seg >= left) {
+            val t = if (seg > 0f) left / seg else 0f
+            out.add(points[i] + (points[i + 1] - points[i]) * t)
+            return out
+        }
+        out.add(points[i + 1])
+        left -= seg
+    }
+    return out
+}
+
 /**
- * Thread unspooling math:
- * Models the arrow as a physical thread being pulled forward through bends/turns.
- * As the thread moves:
- * - The head moves in exitDirection
- * - The tail follows the polyline around corners
- * - Once the tail turns a corner, that bend disappears from the thread
- * - Once the tail passes the original head, the whole thread straightens into a single line!
+ * Snake movement: the arrow slides along its own path.
+ * After travelling [travel] px, the head has moved that far forward in its exit direction,
+ * and the tail has followed the path the same distance, turning the same corners.
  */
 private data class UnspooledThread(
     val points: List<Offset>,
-    val headTip: Offset,
-    val isCompletelyExited: Boolean
+    val headTip: Offset
 )
 
 private fun calculateUnspooledThread(
     originalPoints: List<Offset>,
     direction: ArrowDirection,
-    progress: Float,
-    boardExitDistance: Float
+    travel: Float
 ): UnspooledThread {
-    if (originalPoints.isEmpty()) {
-        return UnspooledThread(emptyList(), Offset.Zero, true)
-    }
+    if (originalPoints.isEmpty()) return UnspooledThread(emptyList(), Offset.Zero)
     val f = Offset(direction.dx.toFloat(), direction.dy.toFloat())
+    val headTip = originalPoints.last() + f * travel
+    if (originalPoints.size == 1) return UnspooledThread(listOf(originalPoints[0], headTip), headTip)
 
-    if (originalPoints.size == 1) {
-        val travel = progress * boardExitDistance
-        val tip = originalPoints[0] + f * travel
-        return UnspooledThread(listOf(originalPoints[0], tip), tip, progress >= 1f)
-    }
-
-    // Cumulative segment lengths
-    val segLengths = FloatArray(originalPoints.size - 1)
+    // Cumulative segment lengths along the original path
     val cumDist = FloatArray(originalPoints.size)
-    cumDist[0] = 0f
     for (i in 0 until originalPoints.size - 1) {
-        val d = (originalPoints[i + 1] - originalPoints[i]).getDistance()
-        segLengths[i] = d
-        cumDist[i + 1] = cumDist[i] + d
+        cumDist[i + 1] = cumDist[i] + (originalPoints[i + 1] - originalPoints[i]).getDistance()
     }
     val totalLength = cumDist.last()
 
-    val totalTravel = totalLength + boardExitDistance
-    val currentDistance = progress * totalTravel
-
-    // The head is at originalPoints.last() + f * currentDistance
-    val headTip = originalPoints.last() + f * currentDistance
-
-    // Check if the entire thread has completely cleared the original polyline
-    if (currentDistance >= totalLength) {
-        val tailDistPastHead = currentDistance - totalLength
-        val tailPoint = originalPoints.last() + f * tailDistPastHead
-
-        // The thread has completely straightened out into a straight line!
-        return UnspooledThread(
-            points = listOf(tailPoint, headTip),
-            headTip = headTip,
-            isCompletelyExited = progress >= 0.98f
-        )
+    // Tail has left the original path: the arrow is now a straight line in front of the old head
+    if (travel >= totalLength) {
+        val tail = originalPoints.last() + f * (travel - totalLength)
+        return UnspooledThread(listOf(tail, headTip), headTip)
     }
 
-    // The tail is still traversing the original polyline at distance currentDistance
-    var tailSegIdx = 0
-    while (tailSegIdx < segLengths.size - 1 && cumDist[tailSegIdx + 1] < currentDistance) {
-        tailSegIdx++
+    // Tail is still on the original path
+    var seg = 0
+    while (seg < originalPoints.size - 2 && cumDist[seg + 1] < travel) seg++
+    val segLen = cumDist[seg + 1] - cumDist[seg]
+    val t = if (segLen > 0f) ((travel - cumDist[seg]) / segLen).coerceIn(0f, 1f) else 0f
+    val tailPos = originalPoints[seg] + (originalPoints[seg + 1] - originalPoints[seg]) * t
+
+    val points = mutableListOf(tailPos)
+    for (i in (seg + 1) until originalPoints.size) points.add(originalPoints[i])
+    if (travel > 0.001f) points.add(headTip)
+    return UnspooledThread(points, headTip)
+}
+
+/** Corner radius of the ice cube, as a fraction of its size. */
+private const val IceCornerFraction = 0.11f
+
+/** Width of the beveled ice rim around the inner face, as a fraction of the cube size. */
+private const val IceRimFraction = 0.075f
+
+/**
+ * Draws the solid body of the 3D ice cube (behind the frozen reward):
+ * a chunky beveled rim (light on top/left, deeper blue on bottom/right) around a recessed inner face.
+ */
+private fun DrawScope.drawIceCubeBody(size: Size, rim: Float) {
+    val w = size.width
+    val h = size.height
+    val outerRadius = w * IceCornerFraction
+
+    // 1. Outer ice volume
+    drawRoundRect(
+        brush = Brush.linearGradient(
+            colors = listOf(Color(0xFFD2F1FF), Color(0xFF86CBF3), Color(0xFF3E97D8)),
+            start = Offset.Zero,
+            end = Offset(w, h)
+        ),
+        size = size,
+        cornerRadius = CornerRadius(outerRadius, outerRadius)
+    )
+
+    // 2. Bevel faces between the outer edge and the inner face (clipped by the rounded canvas)
+    fun bevel(color: Color, pts: List<Offset>) {
+        val p = Path().apply {
+            moveTo(pts[0].x, pts[0].y)
+            for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+            close()
+        }
+        drawPath(p, color)
+    }
+    val tl = Offset(0f, 0f)
+    val tr = Offset(w, 0f)
+    val br = Offset(w, h)
+    val bl = Offset(0f, h)
+    val itl = Offset(rim, rim)
+    val itr = Offset(w - rim, rim)
+    val ibr = Offset(w - rim, h - rim)
+    val ibl = Offset(rim, h - rim)
+    bevel(Color(0xB3F2FBFF), listOf(tl, tr, itr, itl))   // top: brightest
+    bevel(Color(0x80E0F5FF), listOf(tl, itl, ibl, bl))   // left: light
+    bevel(Color(0x593E9FDB), listOf(tr, br, ibr, itr))   // right: shaded
+    bevel(Color(0x733489C9), listOf(bl, ibl, ibr, br))   // bottom: deepest
+
+    // Crystal facets chipped into the rim so it reads as carved ice rather than smooth plastic
+    val rnd = Random(7)
+    repeat(56) { i ->
+        val side = i % 4
+        val t = rnd.nextFloat()
+        val along = w * (0.08f + t * 0.84f)
+        val depth = rim * (0.35f + rnd.nextFloat() * 0.65f)
+        val spread = w * (0.03f + rnd.nextFloat() * 0.06f)
+        val (a, b, c) = when (side) {
+            0 -> Triple(Offset(along - spread, 0f), Offset(along + spread, 0f), Offset(along + spread * 0.3f, depth))
+            1 -> Triple(Offset(w, along - spread), Offset(w, along + spread), Offset(w - depth, along - spread * 0.3f))
+            2 -> Triple(Offset(along - spread, h), Offset(along + spread, h), Offset(along - spread * 0.3f, h - depth))
+            else -> Triple(Offset(0f, along - spread), Offset(0f, along + spread), Offset(depth, along + spread * 0.3f))
+        }
+        val facetColor = if (rnd.nextBoolean()) Color.White.copy(alpha = 0.10f + rnd.nextFloat() * 0.25f)
+        else Color(0xFF2F86C8).copy(alpha = 0.06f + rnd.nextFloat() * 0.14f)
+        bevel(facetColor, listOf(a, b, c))
     }
 
-    val segStartDist = cumDist[tailSegIdx]
-    val segLen = segLengths[tailSegIdx]
-    val t = if (segLen > 0f) ((currentDistance - segStartDist) / segLen).coerceIn(0f, 1f) else 0f
-    val tailPos = originalPoints[tailSegIdx] + (originalPoints[tailSegIdx + 1] - originalPoints[tailSegIdx]) * t
-
-    val threadPoints = mutableListOf<Offset>()
-    threadPoints.add(tailPos)
-
-    // Add remaining intermediate original vertices between tailSegIdx + 1 and the end
-    for (i in (tailSegIdx + 1) until originalPoints.size) {
-        threadPoints.add(originalPoints[i])
-    }
-
-    // Extend forward to current headTip
-    if (currentDistance > 0.001f) {
-        threadPoints.add(headTip)
-    }
-
-    return UnspooledThread(
-        points = threadPoints,
-        headTip = headTip,
-        isCompletelyExited = false
+    // 3. Recessed inner face: clear pale ice, brighter in the middle
+    val innerSize = Size(w - rim * 2, h - rim * 2)
+    val innerRadius = (outerRadius - rim * 0.5f).coerceAtLeast(4f)
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(Color(0xFFC2E8FC), Color(0xFFA6DAF6), Color(0xFF8CCBF0))
+        ),
+        topLeft = itl,
+        size = innerSize,
+        cornerRadius = CornerRadius(innerRadius, innerRadius)
+    )
+    drawCircle(
+        brush = Brush.radialGradient(
+            colors = listOf(Color(0x99F4FBFF), Color(0x00F4FBFF)),
+            center = Offset(w * 0.5f, h * 0.48f),
+            radius = w * 0.42f
+        ),
+        radius = w * 0.42f,
+        center = Offset(w * 0.5f, h * 0.48f)
     )
 }
 
 /**
- * Draws the 3D crystal ice cube block with chamfered crystal bevels and glossy light sheen.
+ * Draws the translucent front of the ice cube (in front of the frozen reward):
+ * a frosty wash, internal crackle veins, glossy reflections, tiny bubbles,
+ * frosted corners and bright bevel edge highlights.
  */
-private fun DrawScope.drawIceCubeBlock(size: Size) {
-    val cornerRadius = CornerRadius(30f, 30f)
+private fun DrawScope.drawIceCubeFront(size: Size, rim: Float) {
+    val w = size.width
+    val h = size.height
+    val outerRadius = w * IceCornerFraction
+    val innerRadius = (outerRadius - rim * 0.5f).coerceAtLeast(4f)
+    val innerTopLeft = Offset(rim, rim)
+    val innerSize = Size(w - rim * 2, h - rim * 2)
 
-    // 1. Crystal clear ice gradient volume
+    // 1. Frost wash so the reward reads as being *inside* the ice
     drawRoundRect(
         brush = Brush.verticalGradient(
-            colors = listOf(
-                Color(0xCCE8F8FF), // Top glossy ice sheen
-                Color(0xB3D0EFFF), // Mid crystalline frost
-                Color(0xCCBCE7FF)  // Base icy depth
-            )
+            colors = listOf(Color(0x4DEAF8FF), Color(0x1AEAF8FF), Color(0x40A9DCF7))
         ),
-        size = size,
-        cornerRadius = cornerRadius
+        topLeft = innerTopLeft,
+        size = innerSize,
+        cornerRadius = CornerRadius(innerRadius, innerRadius)
     )
 
-    // 2. Translucent diagonal reflection facets
-    val facet1 = Path().apply {
-        moveTo(0f, size.height * 0.25f)
-        lineTo(size.width * 0.40f, 0f)
-        lineTo(size.width * 0.58f, 0f)
-        lineTo(0f, size.height * 0.50f)
+    // 2. Internal crackle veins (fixed seed so the pattern never flickers between frames)
+    val rnd = Random(20260926)
+    val veinStroke = 1.dp.toPx()
+    repeat(22) {
+        var x = rim + rnd.nextFloat() * innerSize.width
+        var y = rim + rnd.nextFloat() * innerSize.height
+        val p = Path().apply { moveTo(x, y) }
+        var angle = rnd.nextFloat() * 2f * PI.toFloat()
+        repeat(2 + rnd.nextInt(4)) {
+            angle += (rnd.nextFloat() - 0.5f) * 1.6f
+            val len = w * (0.03f + rnd.nextFloat() * 0.09f)
+            x = (x + cos(angle) * len).coerceIn(rim, w - rim)
+            y = (y + sin(angle) * len).coerceIn(rim, h - rim)
+            p.lineTo(x, y)
+        }
+        val alpha = 0.25f + rnd.nextFloat() * 0.40f
+        // Soft blue shadow under a bright white hairline gives the vein some depth
+        drawPath(p, Color(0xFF5BB4EA).copy(alpha = alpha * 0.45f), style = Stroke(veinStroke * 2.2f, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        drawPath(p, Color.White.copy(alpha = alpha), style = Stroke(veinStroke, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
+
+    // 3. Glossy diagonal reflections
+    val gloss1 = Path().apply {
+        moveTo(rim, h * 0.34f)
+        lineTo(w * 0.36f, rim)
+        lineTo(w * 0.50f, rim)
+        lineTo(rim, h * 0.50f)
         close()
     }
-    drawPath(facet1, Color.White.copy(alpha = 0.40f))
-
-    val facet2 = Path().apply {
-        moveTo(size.width * 0.35f, size.height)
-        lineTo(size.width, size.height * 0.38f)
-        lineTo(size.width, size.height * 0.52f)
-        lineTo(size.width * 0.50f, size.height)
+    drawPath(gloss1, Color.White.copy(alpha = 0.22f))
+    val gloss2 = Path().apply {
+        moveTo(w * 0.58f, h - rim)
+        lineTo(w - rim, h * 0.60f)
+        lineTo(w - rim, h * 0.68f)
+        lineTo(w * 0.66f, h - rim)
         close()
     }
-    drawPath(facet2, Color(0xFF9BE7FF).copy(alpha = 0.25f))
+    drawPath(gloss2, Color.White.copy(alpha = 0.16f))
 
-    // 3. 3D Crystal Bevel: specular white highlight on top/left, deeper cyan frost on bottom/right
+    // 4. Tiny trapped air bubbles
+    repeat(7) {
+        val c = Offset(rim + rnd.nextFloat() * innerSize.width, rim + rnd.nextFloat() * innerSize.height)
+        val r = (1.5f + rnd.nextFloat() * 2.5f).dp.toPx()
+        drawCircle(Color.White.copy(alpha = 0.20f), radius = r, center = c)
+        drawCircle(Color.White.copy(alpha = 0.65f), radius = r, center = c, style = Stroke(0.8.dp.toPx()))
+    }
+
+    // 5. Frosted corners (snowy white glow + feathery frost crystals creeping in from each corner)
+    val frostRadius = w * 0.26f
+    val corners = listOf(Offset(0f, 0f), Offset(w, 0f), Offset(0f, h), Offset(w, h))
+    corners.forEach { corner ->
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(Color(0xF2FFFFFF), Color(0x80FFFFFF), Color(0x00FFFFFF)),
+                center = corner,
+                radius = frostRadius
+            ),
+            radius = frostRadius,
+            center = corner
+        )
+    }
+    val fernStroke = 0.9.dp.toPx()
+    corners.forEach { corner ->
+        // Rays fan out towards the middle of the cube
+        val baseAngle = kotlin.math.atan2(h / 2f - corner.y, w / 2f - corner.x)
+        repeat(7) {
+            val angle = baseAngle + (rnd.nextFloat() - 0.5f) * 1.5f
+            val len = frostRadius * (0.45f + rnd.nextFloat() * 0.55f)
+            val dir = Offset(cos(angle), sin(angle))
+            val end = corner + dir * len
+            val alpha = 0.45f + rnd.nextFloat() * 0.4f
+            drawLine(Color.White.copy(alpha = alpha), corner, end, fernStroke, cap = StrokeCap.Round)
+            // Small side branches like frost ferns
+            var d = len * 0.25f
+            while (d < len * 0.9f) {
+                val from = corner + dir * d
+                val branch = len * (0.10f + rnd.nextFloat() * 0.12f)
+                for (sign in listOf(-1f, 1f)) {
+                    val ba = angle + sign * 0.7f
+                    drawLine(
+                        Color.White.copy(alpha = alpha * 0.8f),
+                        from,
+                        from + Offset(cos(ba), sin(ba)) * branch,
+                        fernStroke * 0.8f,
+                        cap = StrokeCap.Round
+                    )
+                }
+                d += len * (0.14f + rnd.nextFloat() * 0.1f)
+            }
+        }
+    }
+    repeat(60) {
+        // Frost speckles clustered near the corners
+        val corner = corners[rnd.nextInt(4)]
+        val dist = rnd.nextFloat() * frostRadius * 0.9f
+        val a = rnd.nextFloat() * 2f * PI.toFloat()
+        val c = Offset(
+            (corner.x + cos(a) * dist).coerceIn(0f, w),
+            (corner.y + sin(a) * dist).coerceIn(0f, h)
+        )
+        drawCircle(Color.White.copy(alpha = 0.5f + rnd.nextFloat() * 0.5f), radius = (0.6f + rnd.nextFloat()).dp.toPx(), center = c)
+    }
+
+    // 6. Bevel creases from outer corners to inner corners
+    val creaseColor = Color.White.copy(alpha = 0.55f)
+    val crease = 1.2.dp.toPx()
+    val cornerPull = outerRadius * 0.30f
+    drawLine(creaseColor, Offset(cornerPull, cornerPull), Offset(rim, rim), crease)
+    drawLine(creaseColor, Offset(w - cornerPull, cornerPull), Offset(w - rim, rim), crease)
+    drawLine(creaseColor, Offset(cornerPull, h - cornerPull), Offset(rim, h - rim), crease)
+    drawLine(creaseColor, Offset(w - cornerPull, h - cornerPull), Offset(w - rim, h - rim), crease)
+
+    // 7. Edge highlights: bright inner face edge and glossy outer rim
     drawRoundRect(
         brush = Brush.linearGradient(
-            colors = listOf(
-                Color.White.copy(alpha = 0.90f),
-                Color(0xFFBCE7FF),
-                Color(0xFF38BDF8).copy(alpha = 0.65f)
-            ),
-            start = Offset(0f, 0f),
-            end = Offset(size.width, size.height)
+            colors = listOf(Color.White.copy(alpha = 0.95f), Color.White.copy(alpha = 0.45f), Color(0xFF7CC8F2).copy(alpha = 0.8f)),
+            start = Offset.Zero,
+            end = Offset(w, h)
+        ),
+        topLeft = innerTopLeft,
+        size = innerSize,
+        cornerRadius = CornerRadius(innerRadius, innerRadius),
+        style = Stroke(width = 1.6.dp.toPx())
+    )
+    drawRoundRect(
+        brush = Brush.linearGradient(
+            colors = listOf(Color.White, Color(0xFFBCE7FF), Color(0xFF38A3E0)),
+            start = Offset.Zero,
+            end = Offset(w, h)
         ),
         size = size,
-        cornerRadius = cornerRadius,
-        style = Stroke(width = 3.5f)
+        cornerRadius = CornerRadius(outerRadius, outerRadius),
+        style = Stroke(width = 2.5.dp.toPx())
     )
-
-    // 4. Subtle frosted ice grid dots
-    val dotSpacing = 26f
-    var x = dotSpacing
-    while (x < size.width) {
-        var y = dotSpacing
-        while (y < size.height) {
-            drawCircle(
-                color = Color(0x1F2D8FE8),
-                radius = 1.4f,
-                center = Offset(x, y)
-            )
-            y += dotSpacing
-        }
-        x += dotSpacing
-    }
 }
 
 /**

@@ -1,8 +1,11 @@
 package com.example.audio
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.SoundPool
+import com.example.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -14,27 +17,31 @@ import kotlin.math.sin
  * Procedural crystalline audio synthesizer for Ice Arrow Puzzle.
  * Synthesizes crisp ice clicks, whooshes, fractures, and shatters with zero external latency.
  */
-class SoundManager(private val isSoundEnabled: () -> Boolean) {
+class SoundManager(context: Context, private val isSoundEnabled: () -> Boolean) {
 
     private val sampleRate = 44100
     private val scope = CoroutineScope(Dispatchers.Default)
 
+    // Short recorded samples go through SoundPool for low-latency playback
+    private val soundPool = SoundPool.Builder()
+        .setMaxStreams(4)
+        .setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_GAME)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+        )
+        .build()
+    private val arrowTapSoundId = soundPool.load(context, R.raw.arrow_tap, 1)
+
+    /** Crisp phone-style tap click (the tap sound from the reference game). */
     fun playArrowTap() {
         if (!isSoundEnabled()) return
-        scope.launch {
-            // Modern phone UI touch sound: subtle 16ms crisp transient pop
-            val durationMs = 16
-            val numSamples = (sampleRate * (durationMs / 1000.0)).toInt()
-            val buffer = ShortArray(numSamples)
-            for (i in 0 until numSamples) {
-                val t = i.toDouble() / sampleRate
-                val decay = exp(-t * 260.0)
-                val freq = 1800.0 - (t * 24000.0).coerceAtLeast(0.0)
-                val sample = (sin(2 * PI * freq * t) * 0.75 + sin(2 * PI * (freq * 0.5) * t) * 0.25) * decay
-                buffer[i] = (sample * 16000).toInt().coerceIn(-32768, 32767).toShort()
-            }
-            playPcm(buffer)
-        }
+        soundPool.play(arrowTapSoundId, 1f, 1f, 1, 0, 1f)
+    }
+
+    fun release() {
+        soundPool.release()
     }
 
     fun playArrowWhoosh() {

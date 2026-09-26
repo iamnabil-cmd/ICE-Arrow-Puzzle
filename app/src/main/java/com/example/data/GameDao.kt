@@ -22,6 +22,9 @@ interface GameDao {
     @Query("SELECT * FROM level_records ORDER BY levelNumber ASC")
     fun getAllLevelRecordsFlow(): Flow<List<LevelRecordEntity>>
 
+    @Query("SELECT * FROM level_records WHERE levelNumber = :levelNumber LIMIT 1")
+    suspend fun getLevelRecord(levelNumber: Int): LevelRecordEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun recordLevelCompletion(record: LevelRecordEntity)
 

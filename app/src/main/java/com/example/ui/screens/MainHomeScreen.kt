@@ -226,10 +226,7 @@ fun MainHomeScreen(
                 ) {
                     // Continue Game (Level X)
                     Button(
-                        onClick = {
-                            viewModel.loadLevel(currentLevel)
-                            viewModel.onBackToGameplay()
-                        },
+                        onClick = { viewModel.onContinueGameTapped() },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(60.dp)
@@ -257,10 +254,7 @@ fun MainHomeScreen(
 
                     // Restart Game
                     OutlinedButton(
-                        onClick = {
-                            viewModel.loadLevel(currentLevel)
-                            viewModel.onBackToGameplay()
-                        },
+                        onClick = { viewModel.onRestartGameTapped() },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(56.dp)

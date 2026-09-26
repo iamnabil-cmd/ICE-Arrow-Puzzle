@@ -58,5 +58,7 @@ data class LevelDefinition(
     val hiddenRewardType: String? = null, // e.g. "CRYSTAL_TROPHY", "GOLD_STAR", "ICE_RELIC"
     val rewardItemName: String = "Star Hammer",
     val rewardDrawableRes: Int? = null,
-    val tutorialHint: String? = null // e.g. "Tap unblocked arrows to slide them out of the ice"
+    val tutorialHint: String? = null, // e.g. "Tap unblocked arrows to slide them out of the ice"
+    // Daily challenge levels don't advance the player's level progress
+    val isDaily: Boolean = false
 )

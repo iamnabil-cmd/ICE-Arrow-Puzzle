@@ -29,7 +29,9 @@ data class ActiveArrowState(
     val exitProgress: Float = 0f, // 0f to 1f
     val isBlocked: Boolean = false,
     val isHighlighted: Boolean = false,
-    val shakeTrigger: Int = 0
+    val shakeTrigger: Int = 0,
+    // Set the first time this arrow is tapped while blocked; that tap costs a life, repeat taps don't
+    val isWrong: Boolean = false
 )
 
 data class CrystalShard(
@@ -46,6 +48,8 @@ data class CrystalShard(
 
 data class LevelPlayState(
     val definition: LevelDefinition,
+    // Changes every time a level is started or restarted
+    val sessionId: Long = 0L,
     val arrows: Map<String, ActiveArrowState> = emptyMap(),
     val heartsRemaining: Int = 3,
     val movesMade: Int = 0,
