@@ -5,9 +5,7 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.SoundManager
-import com.example.data.AchievementEntity
 import com.example.data.AppDatabase
-import com.example.data.ArrowDirection
 import com.example.data.ArrowModel
 import com.example.data.GameProgressEntity
 import com.example.data.GridPoint
@@ -22,9 +20,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
+import kotlinx.coroutines.withContext
+import java.util.TimeZone
 import kotlin.random.Random
 
 class GameViewModel(application: Application) : AndroidViewModel(application) {
@@ -90,9 +90,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             _screenState.value = ScreenState.SPLASH
             delay(1500)
 
-            // Load saved game progress or start at Level 1
+            // Load saved game progress or start at Level 1 (generated off the main thread)
             val savedProgress = dao.getProgress() ?: GameProgressEntity()
-            loadLevel(savedProgress.currentLevel)
+            val def = withContext(Dispatchers.Default) { LevelRepository.getLevel(savedProgress.currentLevel) }
+            startLevel(def)
 
             // Directly proceed to gameplay!
             _screenState.value = ScreenState.GAMEPLAY
@@ -100,7 +101,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadLevel(levelNum: Int) {
-        val def = LevelRepository.getLevel(levelNum)
+        startLevel(LevelRepository.getLevel(levelNum))
+    }
+
+    private fun startLevel(def: LevelDefinition) {
         val arrowStates = def.arrows.associate { arrow ->
             arrow.id to ActiveArrowState(
                 arrow = arrow,
@@ -117,6 +121,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
         _currentLevelState.value = LevelPlayState(
             definition = def,
+            sessionId = SystemClock.elapsedRealtimeNanos(),
             arrows = arrowStates,
             heartsRemaining = 3,
             movesMade = 0,
@@ -131,8 +136,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         pauseStartedMs = null
 
         // Generate the next level in the background so "Next Level" opens instantly
-        viewModelScope.launch(Dispatchers.Default) {
-            LevelRepository.getLevel(levelNum + 1)
+        if (!def.isDaily) {
+            viewModelScope.launch(Dispatchers.Default) {
+                LevelRepository.getLevel(def.levelNumber + 1)
+            }
         }
     }
 
@@ -273,6 +280,9 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             delay(1500)
+            // The player may have left or restarted during the shatter animation
+            val stillHere = _currentLevelState.value?.let { it.definition == def && it.isShattering } == true
+            if (!stillHere || _screenState.value != ScreenState.GAMEPLAY) return@launch
             soundManager.playVictoryChord()
             hapticManager.celebrate()
 
@@ -290,60 +300,65 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun saveLevelCompletion(def: LevelDefinition, accuracy: Int) {
         val currentProgress = dao.getProgress() ?: GameProgressEntity()
-        val nextLvl = def.levelNumber + 1
-        val newHighest = maxOf(currentProgress.highestUnlockedLevel, nextLvl)
         val isPerfect = accuracy == 100
 
+        // Day streak: +1 for the first clear on a new consecutive day, back to 1 after a missed day
+        val today = localEpochDay()
+        val lastPlayed = currentProgress.lastPlayedDate.toLongOrNull()
+        val newStreak = when (lastPlayed) {
+            today -> currentProgress.streak.coerceAtLeast(1)
+            today - 1 -> currentProgress.streak + 1
+            else -> 1
+        }
+
+        // Replaying an old level or the daily challenge never moves progress backwards or skips ahead
+        val nextLvl = def.levelNumber + 1
         val updatedProgress = currentProgress.copy(
-            currentLevel = nextLvl,
-            highestUnlockedLevel = newHighest,
+            currentLevel = if (def.isDaily) currentProgress.currentLevel else maxOf(currentProgress.currentLevel, nextLvl),
+            highestUnlockedLevel = if (def.isDaily) currentProgress.highestUnlockedLevel
+            else maxOf(currentProgress.highestUnlockedLevel, nextLvl),
             crystals = currentProgress.crystals + def.rewardCrystals,
             coins = currentProgress.coins + def.rewardCoins,
             perfectLevelsCount = currentProgress.perfectLevelsCount + (if (isPerfect) 1 else 0),
-            streak = currentProgress.streak + 1
+            streak = newStreak,
+            lastPlayedDate = today.toString() // stored as the local epoch day
         )
         dao.insertOrUpdateProgress(updatedProgress)
 
-        dao.recordLevelCompletion(
-            LevelRecordEntity(
-                levelNumber = def.levelNumber,
-                stars = if (accuracy >= 95) 3 else if (accuracy >= 80) 2 else 1,
-                bestAccuracy = accuracy,
-                isCompleted = true
-            )
-        )
-
-        // Check achievements
-        updateAchievementsProgress(updatedProgress)
-    }
-
-    private suspend fun updateAchievementsProgress(progress: GameProgressEntity) {
-        val achievements = dao.getAllAchievementsFlow()
-        // Simple helper to mark achievements
-        // "ICE BREAKER"
-        if (progress.currentLevel >= 2) {
-            dao.updateAchievement(
-                AchievementEntity(
-                    id = "ach_ice_breaker",
-                    title = "ICE BREAKER",
-                    description = "Complete your first ice puzzle level.",
-                    currentProgress = 1,
-                    targetProgress = 1,
-                    isUnlocked = true,
-                    rewardCrystals = 50
+        if (!def.isDaily) {
+            val stars = if (accuracy >= 95) 3 else if (accuracy >= 80) 2 else 1
+            val previous = dao.getLevelRecord(def.levelNumber)
+            // Keep the best result when a level is replayed
+            dao.recordLevelCompletion(
+                LevelRecordEntity(
+                    levelNumber = def.levelNumber,
+                    stars = maxOf(stars, previous?.stars ?: 0),
+                    bestAccuracy = maxOf(accuracy, previous?.bestAccuracy ?: 0),
+                    isCompleted = true
                 )
             )
         }
-        if (progress.currentLevel >= 6) {
+
+        updateAchievementsProgress(updatedProgress)
+    }
+
+    /** Recomputes every achievement from the saved progress, keeping whether its reward was claimed. */
+    private suspend fun updateAchievementsProgress(progress: GameProgressEntity) {
+        dao.insertInitialAchievements(AppDatabase.defaultAchievements) // no-op if they already exist
+        val levelsCleared = (progress.highestUnlockedLevel - 1).coerceAtLeast(0)
+        val existing = dao.getAllAchievementsFlow().first().associateBy { it.id }
+
+        AppDatabase.defaultAchievements.forEach { default ->
+            val value = when (default.id) {
+                "ach_perfect_break" -> progress.perfectLevelsCount
+                "ach_crystal_hunter" -> progress.crystals
+                else -> levelsCleared // ice breaker, glacial apprentice, frozen master, shatter king
+            }
+            val current = existing[default.id] ?: default
             dao.updateAchievement(
-                AchievementEntity(
-                    id = "ach_permafrost",
-                    title = "GLACIAL APPRENTICE",
-                    description = "Clear 5 challenging levels.",
-                    currentProgress = 5,
-                    targetProgress = 5,
-                    isUnlocked = true,
-                    rewardCrystals = 100
+                current.copy(
+                    currentProgress = value.coerceAtMost(current.targetProgress),
+                    isUnlocked = value >= current.targetProgress
                 )
             )
         }
@@ -373,19 +388,51 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onNextLevelTapped() {
-        val cur = _currentLevelState.value?.definition?.levelNumber ?: 1
-        val nextLevel = cur + 1
-        loadLevel(nextLevel)
+        val def = _currentLevelState.value?.definition
+        if (def == null || def.isDaily) {
+            // After the daily challenge, "next" goes back to the player's own level
+            onContinueGameTapped()
+            return
+        }
+        loadLevel(def.levelNumber + 1)
         _screenState.value = ScreenState.GAMEPLAY
     }
 
+    /** Restarts whatever was just played, including the daily challenge. */
     fun onReplayLevelTapped() {
-        val cur = _currentLevelState.value?.definition?.levelNumber ?: 1
-        loadLevel(cur)
+        val def = _currentLevelState.value?.definition ?: LevelRepository.getLevel(1)
+        startLevel(def)
+        _screenState.value = ScreenState.GAMEPLAY
+    }
+
+    /** Resumes the level in progress if it's the player's current one, otherwise loads it fresh. */
+    fun onContinueGameTapped() {
+        viewModelScope.launch {
+            val level = (dao.getProgress() ?: GameProgressEntity()).currentLevel
+            val state = _currentLevelState.value
+            val canResume = state != null && !state.definition.isDaily &&
+                state.definition.levelNumber == level && !state.isAllCleared && !state.isShattering
+            if (!canResume) loadLevel(level) else if (!state!!.isPaused) resumeTimer()
+            _screenState.value = ScreenState.GAMEPLAY
+        }
+    }
+
+    /** Always starts the player's current level from the beginning. */
+    fun onRestartGameTapped() {
+        viewModelScope.launch {
+            loadLevel((dao.getProgress() ?: GameProgressEntity()).currentLevel)
+            _screenState.value = ScreenState.GAMEPLAY
+        }
+    }
+
+    fun onPlayDailyChallengeTapped() {
+        startLevel(LevelRepository.getDailyLevel(localEpochDay()))
         _screenState.value = ScreenState.GAMEPLAY
     }
 
     fun onMainMenuTapped() {
+        // Leaving a level in progress pauses its clear timer
+        if (_screenState.value == ScreenState.GAMEPLAY) pauseTimer()
         _screenState.value = ScreenState.MAIN_MENU
     }
 
@@ -395,10 +442,6 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onProfileTapped() {
         _screenState.value = ScreenState.PROFILE
-    }
-
-    fun onBackToGameplay() {
-        _screenState.value = ScreenState.GAMEPLAY
     }
 
     // Boosters / Tools
@@ -508,14 +551,23 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     fun togglePause() {
         val state = _currentLevelState.value ?: return
         val pausing = !state.isPaused
-        val now = SystemClock.elapsedRealtime()
-        if (pausing) {
-            pauseStartedMs = now
-        } else {
-            pauseStartedMs?.let { pausedTotalMs += now - it }
-            pauseStartedMs = null
-        }
+        if (pausing) pauseTimer() else resumeTimer()
         _currentLevelState.value = state.copy(isPaused = pausing)
+    }
+
+    /** Days since 1970-01-01 in the phone's time zone (java.time needs API 26, the app supports 24+). */
+    private fun localEpochDay(): Long {
+        val now = System.currentTimeMillis()
+        return (now + TimeZone.getDefault().getOffset(now)) / 86_400_000L
+    }
+
+    private fun pauseTimer() {
+        if (pauseStartedMs == null) pauseStartedMs = SystemClock.elapsedRealtime()
+    }
+
+    private fun resumeTimer() {
+        pauseStartedMs?.let { pausedTotalMs += SystemClock.elapsedRealtime() - it }
+        pauseStartedMs = null
     }
 
     fun toggleRestartDialog(show: Boolean) {

@@ -2,5 +2,5 @@
   "name": "ICE ARROW PUZZLE",
   "description": "Tactile casual mobile ice puzzle game where you slide out unblocked arrows to crack and shatter crystalline ice blocks.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

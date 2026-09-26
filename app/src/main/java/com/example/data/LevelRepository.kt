@@ -62,6 +62,31 @@ object LevelRepository {
         )
     }
 
+    /**
+     * Today's daily challenge: a fresh generated puzzle for each calendar day, at a
+     * medium-to-hard difficulty that rotates through the week. Pays double crystals.
+     */
+    fun getDailyLevel(epochDay: Long): LevelDefinition {
+        val difficultyLevel = 20 + (Math.floorMod(epochDay, 7L) * 6).toInt() // 20..56
+        val difficulty = LevelGenerator.difficultyFor(difficultyLevel)
+        val arrows = LevelGenerator.generate(difficultyLevel, difficulty, seed = 1_000_000L + epochDay)
+        val (rewardName, rewardRes) = rewardFor(difficultyLevel)
+        return LevelDefinition(
+            levelNumber = difficultyLevel,
+            title = "Daily Challenge",
+            subtitle = "GLACIAL FROST EXPEDITION",
+            cols = difficulty.cols,
+            rows = difficulty.rows,
+            arrows = arrows,
+            movesAllowed = arrows.size + 5,
+            rewardCrystals = 300,
+            rewardCoins = 400,
+            rewardItemName = rewardName,
+            rewardDrawableRes = rewardRes,
+            isDaily = true
+        )
+    }
+
     private fun subtitleFor(levelNum: Int) = when {
         levelNum <= 15 -> "SILVER FROST SANCTUARY"
         levelNum <= 35 -> "GOLDEN BOREALIS VAULT"

@@ -96,7 +96,7 @@ fun HeaderBar(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Level ${def.levelNumber}",
+                        text = def.title,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
                         color = GlacialDeepNavy

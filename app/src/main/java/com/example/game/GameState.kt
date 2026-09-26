@@ -48,6 +48,8 @@ data class CrystalShard(
 
 data class LevelPlayState(
     val definition: LevelDefinition,
+    // Changes every time a level is started or restarted
+    val sessionId: Long = 0L,
     val arrows: Map<String, ActiveArrowState> = emptyMap(),
     val heartsRemaining: Int = 3,
     val movesMade: Int = 0,

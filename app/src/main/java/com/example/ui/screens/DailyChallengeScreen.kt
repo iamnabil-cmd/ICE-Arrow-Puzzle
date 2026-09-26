@@ -202,11 +202,7 @@ fun DailyChallengeScreen(
 
             // Play Daily Button
             Button(
-                onClick = {
-                    // Load special daily puzzle (e.g. level 12)
-                    viewModel.loadLevel(12)
-                    viewModel.onBackToGameplay()
-                },
+                onClick = { viewModel.onPlayDailyChallengeTapped() },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(60.dp)

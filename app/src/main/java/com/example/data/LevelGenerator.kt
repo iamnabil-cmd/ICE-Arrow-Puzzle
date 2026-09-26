@@ -101,13 +101,16 @@ object LevelGenerator {
         )
     }
 
-    /** Deterministically generates the arrows for [level]. The same level always gives the same layout. */
-    fun generate(level: Int, difficulty: Difficulty = difficultyFor(level)): List<ArrowModel> {
+    /**
+     * Deterministically generates arrows at [level]'s difficulty. The same [seed] always gives the same layout;
+     * by default the seed is the level number, so each level always looks the same.
+     */
+    fun generate(level: Int, difficulty: Difficulty = difficultyFor(level), seed: Long = level.toLong()): List<ArrowModel> {
         var best: List<ArrowModel>? = null
         var bestScore = Int.MIN_VALUE
         for (attempt in 0 until 40) {
-            val rng = Random(level * 7_919L + attempt * 104_729L + 17L)
-            val candidate = buildLevel(level, difficulty, rng)
+            val rng = Random(seed * 7_919L + attempt * 104_729L + 17L)
+            val candidate = buildLevel(seed, difficulty, rng)
             val result = validate(candidate, difficulty.cols, difficulty.rows)
             if (!result.isValid) continue
 
@@ -122,7 +125,7 @@ object LevelGenerator {
                 best = candidate
             }
         }
-        return best ?: fallbackLevel(level, difficulty.cols, difficulty.rows)
+        return best ?: fallbackLevel(seed, difficulty.cols, difficulty.rows)
     }
 
     // ------------------------------------------------------------------
@@ -157,14 +160,14 @@ object LevelGenerator {
         }
     }
 
-    private fun buildLevel(level: Int, d: Difficulty, rng: Random): List<ArrowModel> {
+    private fun buildLevel(seed: Long, d: Difficulty, rng: Random): List<ArrowModel> {
         val board = Board(d.cols, d.rows)
         var failures = 0
         while (board.arrows.size < d.targetArrows && failures < 6) {
             val placed = placeBestArrow(board, d, rng)
             if (placed) failures = 0 else failures++
         }
-        return board.arrows.mapIndexed { i, cells -> toArrowModel("g${level}_${i + 1}", cells, board.heads[i]) }
+        return board.arrows.mapIndexed { i, cells -> toArrowModel("g${seed}_${i + 1}", cells, board.heads[i]) }
     }
 
     /** Tries a batch of random candidate arrows and places the one that best fits the difficulty. */
@@ -360,7 +363,7 @@ object LevelGenerator {
     }
 
     /** Simple, always-solvable layout used only if every generation attempt somehow fails. */
-    private fun fallbackLevel(level: Int, cols: Int, rows: Int): List<ArrowModel> {
+    private fun fallbackLevel(seed: Long, cols: Int, rows: Int): List<ArrowModel> {
         val arrows = mutableListOf<ArrowModel>()
         var col = 0
         var i = 0
@@ -368,7 +371,7 @@ object LevelGenerator {
             val up = i % 2 == 0
             val pts = if (up) listOf(GridPoint(col, rows - 1), GridPoint(col, 0))
             else listOf(GridPoint(col, 0), GridPoint(col, rows - 1))
-            arrows.add(ArrowModel("f${level}_${++i}", pts, if (up) ArrowDirection.UP else ArrowDirection.DOWN))
+            arrows.add(ArrowModel("f${seed}_${++i}", pts, if (up) ArrowDirection.UP else ArrowDirection.DOWN))
             col += 2
         }
         return arrows

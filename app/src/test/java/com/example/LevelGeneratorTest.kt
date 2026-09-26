@@ -34,6 +34,18 @@ class LevelGeneratorTest {
     }
 
     @Test
+    fun dailyChallengesAreValidAndChangeEachDay() {
+        val start = 20_000L // an arbitrary day
+        for (day in start until start + 60) {
+            val def = LevelRepository.getDailyLevel(day)
+            assertTrue(def.isDaily)
+            val result = LevelGenerator.validate(def.arrows, def.cols, def.rows)
+            assertTrue("Daily $day invalid: ${result.reason}", result.isValid)
+        }
+        assertTrue(LevelRepository.getDailyLevel(start).arrows != LevelRepository.getDailyLevel(start + 1).arrows)
+    }
+
+    @Test
     fun levelsAreDeterministic() {
         val a = LevelGenerator.generate(42)
         val b = LevelGenerator.generate(42)

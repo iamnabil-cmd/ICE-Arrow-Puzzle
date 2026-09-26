@@ -116,14 +116,14 @@ fun IceBoardView(
     var panOffset by remember { mutableStateOf(Offset.Zero) }
 
     // Reset zoom when level changes
-    LaunchedEffect(def.levelNumber) {
+    LaunchedEffect(levelState.sessionId) {
         zoomScale = 1f
         panOffset = Offset.Zero
     }
 
     // Zoom tip visibility (shown on Level 10+ or complex levels)
     var showZoomTip by remember { mutableStateOf(def.levelNumber >= 10) }
-    LaunchedEffect(def.levelNumber) {
+    LaunchedEffect(levelState.sessionId) {
         if (def.levelNumber >= 10) {
             showZoomTip = true
             delay(5000)
@@ -145,7 +145,7 @@ fun IceBoardView(
 
     // Level intro: arrows draw themselves in when a level starts
     val introAnim = remember { Animatable(0f) }
-    LaunchedEffect(def.levelNumber) {
+    LaunchedEffect(levelState.sessionId) {
         introAnim.snapTo(0f)
         introAnim.animateTo(1f, tween(650, easing = FastOutSlowInEasing))
     }
@@ -508,7 +508,7 @@ fun IceBoardView(
 
                         levelState.arrows.values.forEach { arrowState ->
                             if (!arrowState.isRemoved || arrowState.isExiting) {
-                                key(arrowState.arrow.id) {
+                                key(levelState.sessionId, arrowState.arrow.id) {
                                     ArrowItem(
                                         arrowState = arrowState,
                                         grid = grid,
@@ -524,7 +524,7 @@ fun IceBoardView(
                         }
 
                         // Tutorial callout for Level 1
-                        if (def.levelNumber == 1 && levelState.removedArrowsCount == 0) {
+                        if (def.levelNumber == 1 && !def.isDaily && levelState.removedArrowsCount == 0) {
                             val centerArrow = levelState.arrows.values.firstOrNull { it.arrow.id == "l1_2" }
                             if (centerArrow != null && !centerArrow.isRemoved) {
                                 TutorialBubble(

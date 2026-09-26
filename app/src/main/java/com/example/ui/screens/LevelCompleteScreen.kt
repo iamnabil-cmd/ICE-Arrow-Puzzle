@@ -78,7 +78,10 @@ fun LevelCompleteScreen(
     val accuracy by viewModel.accuracyPercent.collectAsState()
     val clearTimeMs by viewModel.lastClearTimeMs.collectAsState()
     val mistakes by viewModel.lastMistakes.collectAsState()
+    val progress by viewModel.progressFlow.collectAsState()
     val levelDef = lastLevel ?: return
+    // After a daily challenge, the next game is the player's own current level
+    val nextLevelNumber = if (levelDef.isDaily) progress?.currentLevel ?: 1 else levelDef.levelNumber + 1
 
     // Falling confetti anim
     val confettiAnim = remember { Animatable(0f) }
@@ -155,7 +158,7 @@ fun LevelCompleteScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "LEVEL ${levelDef.levelNumber} CLEARED",
+                            text = if (levelDef.isDaily) "DAILY CHALLENGE CLEARED" else "LEVEL ${levelDef.levelNumber} CLEARED",
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 12.sp,
                             color = Color.White
@@ -218,7 +221,7 @@ fun LevelCompleteScreen(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "LEVEL ${levelDef.levelNumber + 1} UNLOCKED",
+                                    text = if (levelDef.isDaily) "DOUBLE REWARD" else "LEVEL $nextLevelNumber UNLOCKED",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 11.sp,
                                     color = GlacialBlue
@@ -379,7 +382,7 @@ fun LevelCompleteScreen(
                                 )
                             }
                             Text(
-                                text = "Level ${levelDef.levelNumber + 1}",
+                                text = "Level $nextLevelNumber",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 12.sp,
                                 color = GlacialBlueLight
