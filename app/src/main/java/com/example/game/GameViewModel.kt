@@ -11,9 +11,11 @@ import com.example.data.ArrowModel
 import com.example.data.GameProgressEntity
 import com.example.data.GridPoint
 import com.example.data.LevelDefinition
+import com.example.data.LevelGenerator
 import com.example.data.LevelRecordEntity
 import com.example.data.LevelRepository
 import com.example.haptics.HapticManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -103,61 +105,50 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             isShattering = false
         )
         _shards.value = emptyList()
+
+        // Generate the next level in the background so "Next Level" opens instantly
+        viewModelScope.launch(Dispatchers.Default) {
+            LevelRepository.getLevel(levelNum + 1)
+        }
     }
 
     private fun recalculateBlockedStates(
         def: LevelDefinition,
         arrowMap: MutableMap<String, ActiveArrowState>
     ) {
-        val activeArrows = arrowMap.values.filter { !it.isRemoved }
+        // Arrows that are already sliding out no longer block anything
+        val occupied = HashMap<GridPoint, String>()
+        arrowMap.values
+            .filter { !it.isRemoved && !it.isExiting }
+            .forEach { s -> LevelGenerator.cellsOf(s.arrow).forEach { occupied[it] = s.arrow.id } }
 
-        activeArrows.forEach { state ->
+        arrowMap.values.filter { !it.isRemoved && !it.isExiting }.forEach { state ->
             val arrow = state.arrow
-            // Pure geometric obstruction: blocked if and only if another arrow lies in front
-            val isBlocked = isPathObstructed(def, arrow, activeArrows)
-            arrowMap[arrow.id] = state.copy(isBlocked = isBlocked)
+            arrowMap[arrow.id] = state.copy(isBlocked = isPathObstructed(def, arrow, occupied))
         }
     }
 
+    /** Blocked if and only if another arrow sits anywhere between this arrow's head and the board edge. */
     private fun isPathObstructed(
         def: LevelDefinition,
         arrow: ArrowModel,
-        activeArrows: List<ActiveArrowState>
+        occupied: Map<GridPoint, String>
     ): Boolean {
         var currCol = arrow.head.col + arrow.direction.dx
         var currRow = arrow.head.row + arrow.direction.dy
 
         while (currCol in 0 until def.cols && currRow in 0 until def.rows) {
-            val point = GridPoint(currCol, currRow)
-            // Check if any other active arrow occupies this point
-            val blocker = activeArrows.firstOrNull { other ->
-                other.arrow.id != arrow.id && isPointOnArrow(other.arrow, point)
-            }
-            if (blocker != null) return true
-
+            val who = occupied[GridPoint(currCol, currRow)]
+            if (who != null && who != arrow.id) return true
             currCol += arrow.direction.dx
             currRow += arrow.direction.dy
         }
         return false
     }
 
-    private fun isPointOnArrow(arrow: ArrowModel, pt: GridPoint): Boolean {
-        if (arrow.points.size < 2) return arrow.points.contains(pt)
-        for (i in 0 until arrow.points.size - 1) {
-            val p1 = arrow.points[i]
-            val p2 = arrow.points[i + 1]
-            val minC = minOf(p1.col, p2.col)
-            val maxC = maxOf(p1.col, p2.col)
-            val minR = minOf(p1.row, p2.row)
-            val maxR = maxOf(p1.row, p2.row)
-            if (pt.col in minC..maxC && pt.row in minR..maxR) return true
-        }
-        return false
-    }
-
     fun onArrowTapped(arrowId: String) {
         val state = _currentLevelState.value ?: return
-        if (state.isShattering) return
+        if (state.isShattering || state.isOutOfLives || state.isPaused) return
         val arrowState = state.arrows[arrowId] ?: return
         if (arrowState.isRemoved || arrowState.isExiting) return
 
@@ -168,29 +159,34 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (arrowState.isBlocked) {
-            // Blocked arrow interaction: shake + audio thud + haptic
+            // Blocked arrow: it bumps into its blocker and turns red.
+            // Only the first wrong tap on each arrow costs a life; tapping the same red arrow again is free.
             soundManager.playBlockedThud()
             hapticManager.blocked()
+            val costsLife = !arrowState.isWrong && state.heartsRemaining > 0
             val newArrows = state.arrows.toMutableMap()
-            newArrows[arrowId] = arrowState.copy(shakeTrigger = arrowState.shakeTrigger + 1)
-            val newHearts = (state.heartsRemaining - 1).coerceAtLeast(0)
-            val outOfLives = newHearts == 0
+            newArrows[arrowId] = arrowState.copy(
+                shakeTrigger = arrowState.shakeTrigger + 1,
+                isWrong = true
+            )
+            val newHearts = if (costsLife) state.heartsRemaining - 1 else state.heartsRemaining
             _currentLevelState.value = state.copy(
                 arrows = newArrows,
-                errorsMade = state.errorsMade + 1,
+                errorsMade = state.errorsMade + if (costsLife) 1 else 0,
                 heartsRemaining = newHearts,
-                isOutOfLives = outOfLives
+                isOutOfLives = newHearts == 0
             )
             return
         }
 
-        // Available arrow tapped: start smooth exit!
+        // Free arrow tapped: it slides out, and anything it was blocking is free straight away
         soundManager.playArrowTap()
         soundManager.playArrowWhoosh()
         hapticManager.tap()
 
         val updatedMap = state.arrows.toMutableMap()
-        updatedMap[arrowId] = arrowState.copy(isExiting = true)
+        updatedMap[arrowId] = arrowState.copy(isExiting = true, isHighlighted = false)
+        recalculateBlockedStates(state.definition, updatedMap)
         _currentLevelState.value = state.copy(
             arrows = updatedMap,
             movesMade = state.movesMade + 1
@@ -200,7 +196,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     fun onArrowExitCompleted(arrowId: String) {
         val currentState = _currentLevelState.value ?: return
         val arrowState = currentState.arrows[arrowId] ?: return
-        if (arrowState.isRemoved) return
+        if (arrowState.isRemoved || !arrowState.isExiting) return
 
         val newArrows = currentState.arrows.toMutableMap()
         newArrows[arrowId] = arrowState.copy(isRemoved = true, isExiting = false, exitProgress = 1f)
@@ -383,7 +379,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     // Boosters / Tools
     fun onHintTapped() {
         val state = _currentLevelState.value ?: return
-        val availableArrow = state.arrows.values.firstOrNull { !it.isRemoved && !it.isBlocked } ?: return
+        val availableArrow = state.arrows.values.firstOrNull { !it.isRemoved && !it.isExiting && !it.isBlocked } ?: return
 
         viewModelScope.launch {
             val progress = dao.getProgress() ?: GameProgressEntity()

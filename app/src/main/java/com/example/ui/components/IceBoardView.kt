@@ -41,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,6 +68,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +76,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.ArrowDirection
 import com.example.data.ArrowModel
+import com.example.data.GridPoint
+import com.example.data.LevelGenerator
 import com.example.game.ActiveArrowState
 import com.example.game.LevelPlayState
 import com.example.ui.theme.AuroraGold
@@ -94,7 +98,7 @@ import kotlin.random.Random
  * 1. Reward item frozen inside a chunky, beveled 3D ice cube (frosted corners, crackle veins)
  * 2. The ice block that cracks bit-by-bit with every arrow, and cracks open completely on the last arrow
  * 3. Thin arrow line with a bold, sharp directional arrowhead pointer
- * 4. Thread unspooling exit animation (thread getting out of the box from curved lines to straight line, matching Arrow-going-I-want.mp4)
+ * 4. Snake-style exit: the arrow slides out along its own path at a constant speed and leaves the screen
  * 5. Full Pinch-to-Zoom & Pan support with tooltip on Level 10+
  */
 @Composable
@@ -137,6 +141,13 @@ fun IceBoardView(
                 repeatMode = RepeatMode.Reverse
             )
         )
+    }
+
+    // Level intro: arrows draw themselves in when a level starts
+    val introAnim = remember { Animatable(0f) }
+    LaunchedEffect(def.levelNumber) {
+        introAnim.snapTo(0f)
+        introAnim.animateTo(1f, tween(650, easing = FastOutSlowInEasing))
     }
 
     // Touch ring ripple feedback
@@ -399,8 +410,19 @@ fun IceBoardView(
                 ) {
                     val boardWidth = constraints.maxWidth.toFloat()
                     val boardHeight = constraints.maxHeight.toFloat()
-                    val colStep = boardWidth / (def.cols + 1)
-                    val rowStep = boardHeight / (def.rows + 1)
+                    val density = LocalDensity.current
+                    val grid = remember(def.cols, def.rows, boardWidth, boardHeight, density) {
+                        BoardGrid.fit(def.cols, def.rows, boardWidth, boardHeight, with(density) { MaxDotSpacing.toPx() })
+                    }
+
+                    // Which dot belongs to which arrow (arrows already leaving don't block anyone)
+                    val occupancy = remember(levelState.arrows) {
+                        val map = HashMap<GridPoint, String>()
+                        levelState.arrows.values
+                            .filter { !it.isRemoved && !it.isExiting }
+                            .forEach { s -> LevelGenerator.cellsOf(s.arrow).forEach { map[it] = s.arrow.id } }
+                        map
+                    }
 
                     // Alignment Grid Lines (matching Grid.mp4 [#] toggle feature)
                     if (levelState.isGridActive) {
@@ -413,7 +435,7 @@ fun IceBoardView(
                             val activeRows = activeArrows.flatMap { it.arrow.points.map { pt -> pt.row } }.toSet()
 
                             activeCols.forEach { col ->
-                                val x = (col + 1) * colStep
+                                val x = grid.x(col)
                                 drawLine(
                                     color = gridLineColor,
                                     start = Offset(x, 0f),
@@ -423,7 +445,7 @@ fun IceBoardView(
                             }
 
                             activeRows.forEach { row ->
-                                val y = (row + 1) * rowStep
+                                val y = grid.y(row)
                                 drawLine(
                                     color = gridLineColor,
                                     start = Offset(0f, y),
@@ -434,8 +456,7 @@ fun IceBoardView(
 
                             // 2. Alignment projection line in direction of each arrow
                             activeArrows.forEach { aState ->
-                                val head = aState.arrow.head
-                                val headOffset = Offset((head.col + 1) * colStep, (head.row + 1) * rowStep)
+                                val headOffset = grid.offset(aState.arrow.head)
                                 val forward = Offset(aState.arrow.direction.dx.toFloat(), aState.arrow.direction.dy.toFloat())
                                 val projectEnd = headOffset + forward * maxOf(size.width, size.height)
 
@@ -452,17 +473,16 @@ fun IceBoardView(
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .pointerInput(levelState, zoomScale, panOffset) {
+                            .pointerInput(levelState, zoomScale, panOffset, grid) {
                                 detectTapGestures { tapOffset ->
                                     val activeArrows = levelState.arrows.values.filter { !it.isRemoved && !it.isExiting }
                                     var closestArrowId: String? = null
                                     var minDistance = Float.MAX_VALUE
-                                    val tapThreshold = 52.dp.toPx()
+                                    // Generous on sparse boards, tighter on dense ones so the nearest arrow wins
+                                    val tapThreshold = (grid.step * 0.9f).coerceIn(24.dp.toPx(), 52.dp.toPx())
 
                                     activeArrows.forEach { aState ->
-                                        val pts = aState.arrow.points.map { pt ->
-                                            Offset((pt.col + 1) * colStep, (pt.row + 1) * rowStep)
-                                        }
+                                        val pts = aState.arrow.points.map { grid.offset(it) }
                                         val dist = distanceToArrowPath(tapOffset, pts)
                                         if (dist <= tapThreshold && dist < minDistance) {
                                             minDistance = dist
@@ -486,18 +506,20 @@ fun IceBoardView(
                             }
                         }
 
-                        // Render each arrow with thread unspooling animation
                         levelState.arrows.values.forEach { arrowState ->
                             if (!arrowState.isRemoved || arrowState.isExiting) {
-                                ArrowItem(
-                                    arrowState = arrowState,
-                                    cols = def.cols,
-                                    rows = def.rows,
-                                    boardWidth = boardWidth,
-                                    boardHeight = boardHeight,
-                                    pulseScale = pulseAnim.value,
-                                    onExitCompleted = { onArrowExitCompleted(arrowState.arrow.id) }
-                                )
+                                key(arrowState.arrow.id) {
+                                    ArrowItem(
+                                        arrowState = arrowState,
+                                        grid = grid,
+                                        boardWidth = boardWidth,
+                                        boardHeight = boardHeight,
+                                        freeCellsAhead = freeCellsAhead(arrowState.arrow, occupancy, def.cols, def.rows),
+                                        introProgress = introAnim.value,
+                                        pulseScale = pulseAnim.value,
+                                        onExitCompleted = { onArrowExitCompleted(arrowState.arrow.id) }
+                                    )
+                                }
                             }
                         }
 
@@ -519,82 +541,127 @@ fun IceBoardView(
     }
 }
 
+/** Largest gap between neighbouring dots, so small early levels stay compact instead of stretching out. */
+private val MaxDotSpacing = 34.dp
+
+/** Speed arrows travel at when they slide out, like the reference game. */
+private const val ExitSpeedDpPerMs = 1.25f
+
+/** Maps grid dots to pixel positions: one uniform spacing, centred in the board. */
+private data class BoardGrid(val step: Float, val originX: Float, val originY: Float) {
+    fun x(col: Int) = originX + col * step
+    fun y(row: Int) = originY + row * step
+    fun offset(pt: GridPoint) = Offset(x(pt.col), y(pt.row))
+
+    companion object {
+        fun fit(cols: Int, rows: Int, width: Float, height: Float, maxStep: Float): BoardGrid {
+            val step = minOf(width / (cols + 1), height / (rows + 1), maxStep)
+            return BoardGrid(
+                step = step,
+                originX = (width - step * (cols - 1)) / 2f,
+                originY = (height - step * (rows - 1)) / 2f
+            )
+        }
+    }
+}
+
+/** Number of empty dots between an arrow's head and the first arrow in its way (or the edge). */
+private fun freeCellsAhead(arrow: ArrowModel, occupancy: Map<GridPoint, String>, cols: Int, rows: Int): Int {
+    var c = arrow.head.col + arrow.direction.dx
+    var r = arrow.head.row + arrow.direction.dy
+    var free = 0
+    while (c in 0 until cols && r in 0 until rows) {
+        val who = occupancy[GridPoint(c, r)]
+        if (who != null && who != arrow.id) return free
+        free++
+        c += arrow.direction.dx
+        r += arrow.direction.dy
+    }
+    return free
+}
+
 /**
- * Renders an arrow with THREAD UNSPOOLING animation:
- * - When tapped, the arrow unspools like a thread getting out of the box from curved lines to a straight line!
- * - Head extends forward along the exit direction
- * - Tail follows along the segments of the polyline, turning corners until the whole arrow straightens out and exits!
- * - Thick line with sharp directional arrowhead pointer on the side it will go (matching arrow-design.jpg)
+ * Renders one arrow and its animations:
+ * - Intro: the line draws itself in from the tail when the level starts.
+ * - Exit: it turns blue and slides out snake-style along its own path at a constant speed,
+ *   then keeps going until it has left the screen (like the reference game).
+ * - Wrong tap: it turns red, bumps forward into the arrow that blocks it and springs back.
+ *   It stays red, so the player can see which arrow already cost a life.
  */
 @Composable
 private fun ArrowItem(
     arrowState: ActiveArrowState,
-    cols: Int,
-    rows: Int,
+    grid: BoardGrid,
     boardWidth: Float,
     boardHeight: Float,
+    freeCellsAhead: Int,
+    introProgress: Float,
     pulseScale: Float,
     onExitCompleted: () -> Unit
 ) {
     val arrow = arrowState.arrow
     val isAvailable = !arrowState.isBlocked && !arrowState.isRemoved
     val isHinted = arrowState.isHighlighted
+    val density = LocalDensity.current
 
-    val colStep = boardWidth / (cols + 1)
-    val rowStep = boardHeight / (rows + 1)
+    val originalPoints = remember(arrow.points, grid) { arrow.points.map { grid.offset(it) } }
+    val pathLength = remember(originalPoints) {
+        (0 until originalPoints.size - 1).sumOf { (originalPoints[it + 1] - originalPoints[it]).getDistance().toDouble() }.toFloat()
+    }
 
-    // Shake animation when blocked arrow is tapped
-    val shakeOffset = remember { Animatable(0f) }
+    // How far the snake has travelled along its path (px). Drives both the bump and the exit.
+    val travel = remember { Animatable(0f) }
+
+    // Bump into the blocker and back when a blocked arrow is tapped
     LaunchedEffect(arrowState.shakeTrigger) {
-        if (arrowState.shakeTrigger > 0) {
-            shakeOffset.animateTo(12f, tween(30))
-            shakeOffset.animateTo(-12f, tween(30))
-            shakeOffset.animateTo(8f, tween(30))
-            shakeOffset.animateTo(-8f, tween(30))
-            shakeOffset.animateTo(0f, tween(30))
+        if (arrowState.shakeTrigger > 0 && !arrowState.isExiting) {
+            val bump = (freeCellsAhead + 0.45f) * grid.step
+            travel.snapTo(0f)
+            travel.animateTo(bump, tween(durationMillis = (90 + freeCellsAhead * 25).coerceAtMost(200), easing = FastOutSlowInEasing))
+            travel.animateTo(0f, tween(durationMillis = 180, easing = FastOutSlowInEasing))
         }
     }
 
-    // Continuous 60fps/120fps thread unspooling exit animation (matching Arrow-going-I-want.mp4)
-    val exitAnim = remember { Animatable(0f) }
+    // Exit: slide along the path and all the way off-screen at a constant speed
+    val exitDistance = remember(originalPoints, boardWidth, boardHeight) {
+        val head = originalPoints.last()
+        val toEdge = when (arrow.direction) {
+            ArrowDirection.UP -> head.y
+            ArrowDirection.DOWN -> boardHeight - head.y
+            ArrowDirection.LEFT -> head.x
+            ArrowDirection.RIGHT -> boardWidth - head.x
+        }
+        // Past the board edge, keep going far enough to clear the rest of the screen
+        pathLength + toEdge + maxOf(boardWidth, boardHeight) * 1.3f
+    }
     LaunchedEffect(arrowState.isExiting) {
         if (arrowState.isExiting) {
-            exitAnim.animateTo(
-                targetValue = 1f,
-                animationSpec = tween(durationMillis = 280, easing = LinearEasing)
-            )
+            val remaining = exitDistance - travel.value
+            val speedPxPerMs = with(density) { ExitSpeedDpPerMs.dp.toPx() }
+            val duration = (remaining / speedPxPerMs).toInt().coerceIn(220, 750)
+            travel.animateTo(exitDistance, tween(durationMillis = duration, easing = LinearEasing))
             onExitCompleted()
         }
     }
 
-    // Base coordinates
-    val originalPoints = remember(arrow.points, colStep, rowStep) {
-        arrow.points.map { pt ->
-            Offset((pt.col + 1) * colStep, (pt.row + 1) * rowStep)
-        }
-    }
-
-    // Calculate unspooled thread polyline
-    val boardExitSpan = maxOf(boardWidth, boardHeight) * 1.6f
-    val unspooled = remember(originalPoints, arrow.direction, exitAnim.value) {
+    val unspooled = remember(originalPoints, arrow.direction, travel.value) {
         calculateUnspooledThread(
             originalPoints = originalPoints,
             direction = arrow.direction,
-            progress = exitAnim.value,
-            boardExitDistance = boardExitSpan
+            travel = travel.value
         )
     }
+    if (arrowState.isExiting && travel.value >= exitDistance - 0.5f) return
 
-    if (unspooled.isCompletelyExited) return
-
-    val threadPoints = unspooled.points
-    if (threadPoints.size < 2) return
+    // Intro: reveal the line from the tail towards the head
+    val drawn = if (introProgress < 1f) trimPolyline(unspooled.points, pathLength * introProgress) else unspooled.points
+    if (drawn.size < 2) return
 
     Canvas(modifier = Modifier.fillMaxSize()) {
         val arrowColor = when {
-            arrowState.isExiting -> Color(0xFF2563EB) // Electric blue when unspooling
-            arrowState.isBlocked && arrowState.shakeTrigger > 0 -> ErrorFracture
+            arrowState.isExiting -> Color(0xFF2563EB) // Electric blue while sliding out
             isHinted -> AuroraGold
+            arrowState.isWrong -> Color(0xFFE5484D) // Stays red after costing a life
             else -> Color(0xFF0F1B3D) // Deep midnight navy
         }
 
@@ -603,24 +670,25 @@ private fun ArrowItem(
         val normal = Offset(-forward.y, forward.x)
 
         // Thin line + bold, sharp triangular pointer (sized in dp so it looks the same on every screen)
-        val headScale = if (isHinted) pulseScale else 1f
+        val headScale = (if (isHinted) pulseScale else 1f) * ((introProgress - 0.75f) / 0.25f).coerceIn(0f, 1f)
         val shaftWidth = 3.2.dp.toPx()
         val headLength = 10.dp.toPx() * headScale
         val halfWingWidth = 6.5.dp.toPx() * headScale
 
-        val tip = unspooled.headTip + forward * 3.dp.toPx()
+        val tip = unspooled.headTip + forward * 3.dp.toPx() * headScale
         val baseCenter = tip - forward * headLength
         val leftWing = baseCenter + normal * halfWingWidth
         val rightWing = baseCenter - normal * halfWingWidth
 
         // The shaft runs slightly into the pointer so there is no visible seam
-        val shaftEnd = baseCenter + forward * 1.dp.toPx()
+        val shaftEnd = baseCenter + forward * 1.dp.toPx() * headScale
         val shaftPath = Path().apply {
-            moveTo(threadPoints.first().x + shakeOffset.value, threadPoints.first().y)
-            for (i in 1 until threadPoints.size - 1) {
-                lineTo(threadPoints[i].x + shakeOffset.value, threadPoints[i].y)
+            moveTo(drawn.first().x, drawn.first().y)
+            for (i in 1 until drawn.size - 1) {
+                lineTo(drawn[i].x, drawn[i].y)
             }
-            lineTo(shaftEnd.x + shakeOffset.value, shaftEnd.y)
+            val last = if (introProgress < 1f) drawn.last() else shaftEnd
+            lineTo(last.x, last.y)
         }
 
         // Glow effect when hinted or moving
@@ -636,7 +704,7 @@ private fun ArrowItem(
                 color = Color(0x442563EB),
                 style = Stroke(width = 9.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
-        } else if (isAvailable) {
+        } else if (isAvailable || arrowState.isWrong) {
             // Faint frosty halo so the thin line stays readable over the frozen reward
             drawPath(
                 path = shaftPath,
@@ -652,114 +720,87 @@ private fun ArrowItem(
             style = Stroke(width = shaftWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
         )
 
-        // Bold, sharp directional arrowhead
-        val arrowPointerPath = Path().apply {
-            moveTo(tip.x + shakeOffset.value, tip.y)
-            lineTo(leftWing.x + shakeOffset.value, leftWing.y)
-            lineTo(rightWing.x + shakeOffset.value, rightWing.y)
-            close()
+        if (headScale > 0f) {
+            // Bold, sharp directional arrowhead
+            val arrowPointerPath = Path().apply {
+                moveTo(tip.x, tip.y)
+                lineTo(leftWing.x, leftWing.y)
+                lineTo(rightWing.x, rightWing.y)
+                close()
+            }
+            drawPath(path = arrowPointerPath, color = arrowColor)
+            // Thin stroke in the same color rounds off the very tips so they don't look jagged
+            drawPath(
+                path = arrowPointerPath,
+                color = arrowColor,
+                style = Stroke(width = 1.dp.toPx(), join = StrokeJoin.Round)
+            )
         }
-        drawPath(path = arrowPointerPath, color = arrowColor)
-        // Thin stroke in the same color rounds off the very tips so they don't look jagged
-        drawPath(
-            path = arrowPointerPath,
-            color = arrowColor,
-            style = Stroke(width = 1.dp.toPx(), join = StrokeJoin.Round)
-        )
     }
 }
 
+/** Keeps the first [length] px of a polyline. */
+private fun trimPolyline(points: List<Offset>, length: Float): List<Offset> {
+    if (points.size < 2 || length <= 0f) return emptyList()
+    val out = mutableListOf(points.first())
+    var left = length
+    for (i in 0 until points.size - 1) {
+        val seg = (points[i + 1] - points[i]).getDistance()
+        if (seg >= left) {
+            val t = if (seg > 0f) left / seg else 0f
+            out.add(points[i] + (points[i + 1] - points[i]) * t)
+            return out
+        }
+        out.add(points[i + 1])
+        left -= seg
+    }
+    return out
+}
+
 /**
- * Thread unspooling math:
- * Models the arrow as a physical thread being pulled forward through bends/turns.
- * As the thread moves:
- * - The head moves in exitDirection
- * - The tail follows the polyline around corners
- * - Once the tail turns a corner, that bend disappears from the thread
- * - Once the tail passes the original head, the whole thread straightens into a single line!
+ * Snake movement: the arrow slides along its own path.
+ * After travelling [travel] px, the head has moved that far forward in its exit direction,
+ * and the tail has followed the path the same distance, turning the same corners.
  */
 private data class UnspooledThread(
     val points: List<Offset>,
-    val headTip: Offset,
-    val isCompletelyExited: Boolean
+    val headTip: Offset
 )
 
 private fun calculateUnspooledThread(
     originalPoints: List<Offset>,
     direction: ArrowDirection,
-    progress: Float,
-    boardExitDistance: Float
+    travel: Float
 ): UnspooledThread {
-    if (originalPoints.isEmpty()) {
-        return UnspooledThread(emptyList(), Offset.Zero, true)
-    }
+    if (originalPoints.isEmpty()) return UnspooledThread(emptyList(), Offset.Zero)
     val f = Offset(direction.dx.toFloat(), direction.dy.toFloat())
+    val headTip = originalPoints.last() + f * travel
+    if (originalPoints.size == 1) return UnspooledThread(listOf(originalPoints[0], headTip), headTip)
 
-    if (originalPoints.size == 1) {
-        val travel = progress * boardExitDistance
-        val tip = originalPoints[0] + f * travel
-        return UnspooledThread(listOf(originalPoints[0], tip), tip, progress >= 1f)
-    }
-
-    // Cumulative segment lengths
-    val segLengths = FloatArray(originalPoints.size - 1)
+    // Cumulative segment lengths along the original path
     val cumDist = FloatArray(originalPoints.size)
-    cumDist[0] = 0f
     for (i in 0 until originalPoints.size - 1) {
-        val d = (originalPoints[i + 1] - originalPoints[i]).getDistance()
-        segLengths[i] = d
-        cumDist[i + 1] = cumDist[i] + d
+        cumDist[i + 1] = cumDist[i] + (originalPoints[i + 1] - originalPoints[i]).getDistance()
     }
     val totalLength = cumDist.last()
 
-    val totalTravel = totalLength + boardExitDistance
-    val currentDistance = progress * totalTravel
-
-    // The head is at originalPoints.last() + f * currentDistance
-    val headTip = originalPoints.last() + f * currentDistance
-
-    // Check if the entire thread has completely cleared the original polyline
-    if (currentDistance >= totalLength) {
-        val tailDistPastHead = currentDistance - totalLength
-        val tailPoint = originalPoints.last() + f * tailDistPastHead
-
-        // The thread has completely straightened out into a straight line!
-        return UnspooledThread(
-            points = listOf(tailPoint, headTip),
-            headTip = headTip,
-            isCompletelyExited = progress >= 0.98f
-        )
+    // Tail has left the original path: the arrow is now a straight line in front of the old head
+    if (travel >= totalLength) {
+        val tail = originalPoints.last() + f * (travel - totalLength)
+        return UnspooledThread(listOf(tail, headTip), headTip)
     }
 
-    // The tail is still traversing the original polyline at distance currentDistance
-    var tailSegIdx = 0
-    while (tailSegIdx < segLengths.size - 1 && cumDist[tailSegIdx + 1] < currentDistance) {
-        tailSegIdx++
-    }
+    // Tail is still on the original path
+    var seg = 0
+    while (seg < originalPoints.size - 2 && cumDist[seg + 1] < travel) seg++
+    val segLen = cumDist[seg + 1] - cumDist[seg]
+    val t = if (segLen > 0f) ((travel - cumDist[seg]) / segLen).coerceIn(0f, 1f) else 0f
+    val tailPos = originalPoints[seg] + (originalPoints[seg + 1] - originalPoints[seg]) * t
 
-    val segStartDist = cumDist[tailSegIdx]
-    val segLen = segLengths[tailSegIdx]
-    val t = if (segLen > 0f) ((currentDistance - segStartDist) / segLen).coerceIn(0f, 1f) else 0f
-    val tailPos = originalPoints[tailSegIdx] + (originalPoints[tailSegIdx + 1] - originalPoints[tailSegIdx]) * t
-
-    val threadPoints = mutableListOf<Offset>()
-    threadPoints.add(tailPos)
-
-    // Add remaining intermediate original vertices between tailSegIdx + 1 and the end
-    for (i in (tailSegIdx + 1) until originalPoints.size) {
-        threadPoints.add(originalPoints[i])
-    }
-
-    // Extend forward to current headTip
-    if (currentDistance > 0.001f) {
-        threadPoints.add(headTip)
-    }
-
-    return UnspooledThread(
-        points = threadPoints,
-        headTip = headTip,
-        isCompletelyExited = false
-    )
+    val points = mutableListOf(tailPos)
+    for (i in (seg + 1) until originalPoints.size) points.add(originalPoints[i])
+    if (travel > 0.001f) points.add(headTip)
+    return UnspooledThread(points, headTip)
 }
 
 /** Corner radius of the ice cube, as a fraction of its size. */
